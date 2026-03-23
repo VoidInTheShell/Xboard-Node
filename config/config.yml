@@ -1,0 +1,82 @@
+# Xboard Node Configuration
+# Copy this file to config.yml and modify as needed
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MINIMAL CONFIGURATION (Recommended)
+# Most settings (Node ID, Kernel, TLS, Rules) can be managed via the Panel.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Panel connection settings
+panel:
+  # Xboard panel URL (required)
+  url: "https://panel.example.com"
+  # Server communication token (required, must match panel settings)
+  token: "your-server-token"
+  # Node ID as configured in the panel
+  node_id: 1
+
+# Kernel settings (optional defaults)
+kernel:
+  # Kernel type: "singbox" (default) or "xray"
+  type: "singbox"
+  # Directory to store generated configs (default: /etc/xboard-node)
+  config_dir: "/etc/xboard-node"
+  # Kernel log level: debug/info/warn/error (default: warn, can be overridden by panel)
+  log_level: "warn"
+
+# TLS certificate settings (optional, can be managed by panel)
+# cert_mode: "http" | "dns" | "self" | "file" | "none"
+#   http  - ACME HTTP-01 challenge (requires port 80 open to internet)
+#   dns   - ACME DNS-01 challenge (supports wildcard certs, requires dns_provider)
+#   self  - self-signed certificate (valid 10 years, no external dependency)
+#   file  - manually specify cert_file / key_file
+#   none  - no TLS (default)
+cert:
+  cert_mode: "none"
+  # Domain for ACME or self-signed cert
+  # domain: "node.example.com"
+  # Email for ACME registration
+  # email: "admin@example.com"
+
+  # ── HTTP-01 mode ──
+  # http_port: 80               # local port for ACME challenge (default: 80)
+
+  # ── DNS-01 mode ──
+  # dns_provider: "cloudflare"   # supported: cloudflare, alidns
+  # dns_env:                     # provider-specific credentials
+  #   CF_API_TOKEN: "your-cloudflare-api-token"
+
+  # ── File mode ──
+  # cert_file: "/etc/ssl/certs/cert.pem"
+  # key_file: "/etc/ssl/private/key.pem"
+
+  # Storage directory for auto certs (default: {config_dir}/certs)
+  # cert_dir: "/etc/xboard-node/certs"
+
+# Logging settings
+log:
+  # Node log level: debug/info/warn/error (default: info)
+  level: "info"
+  # Log output: stdout/stderr or file path (default: stdout)
+  output: "stdout"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ADVANCED / MULTI-NODE MODE
+# Run multiple nodes with one configuration file.
+# Each node gets its own isolated working directory.
+# ══════════════════════════════════════════════════════════════════════════════
+# When `nodes:` is present, the top-level `panel.node_id` is ignored.
+#
+# nodes:
+#   - node_id: 1
+#
+#   - node_id: 2
+#     # Optional overrides per node
+#     kernel_type: "xray"
+#     cert:
+#       auto_tls: true
+#       domain: "node2.example.com"
+#
+#   - node_id: 3
+#     kernel:
+#       config_dir: "/etc/xboard-node/custom-node-3"
