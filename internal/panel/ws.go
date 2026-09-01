@@ -322,6 +322,13 @@ func (w *WSClient) connect(ctx context.Context) error {
 			return fmt.Errorf("read: %w", err)
 
 		case <-reportTicker.C:
+			// Send an RFC 6455 control ping even when there is no status payload.
+			// Reverse proxies can otherwise leave a dead connection half-open, while
+			// a healthy but quiet panel would never refresh the read deadline.
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(10*time.Second)); err != nil {
+				return fmt.Errorf("write ping: %w", err)
+			}
+
 			// Send periodic node.status via WebSocket
 			if w.onPing != nil {
 				msg := wsMessage{Event: "node.status"}

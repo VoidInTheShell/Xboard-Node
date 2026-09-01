@@ -282,6 +282,55 @@ func TestWSClient_ReconnectsWhenConnectionGoesSilent(t *testing.T) {
 	}
 }
 
+func TestWSClient_KeepsQuietConnectionAliveWithControlPings(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	var mu sync.Mutex
+	connectCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		mu.Lock()
+		connectCount++
+		mu.Unlock()
+
+		if err := conn.WriteJSON(wsMessage{Event: "auth.success"}); err != nil {
+			return
+		}
+		for {
+			var msg wsMessage
+			if err := conn.ReadJSON(&msg); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	host := strings.TrimPrefix(server.URL, "http://")
+	ws := NewWSClient("ws://"+host, "ping-token", 1, WSClientConfig{
+		StatusInterval: 20 * time.Millisecond,
+		ReadTimeout:    80 * time.Millisecond,
+	}, func(WSEvent) {}, nil, func() map[string]interface{} { return nil })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	go ws.Run(ctx)
+
+	time.Sleep(250 * time.Millisecond)
+	if !ws.IsConnected() {
+		t.Fatal("expected control ping/pong traffic to keep a quiet connection alive")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if connectCount != 1 {
+		t.Fatalf("expected one stable connection, got %d", connectCount)
+	}
+}
+
 func TestWSClient_FallbackWhenNoServer(t *testing.T) {
 	ws := NewWSClient("ws://127.0.0.1:19999", "fallback-token", 1, WSClientConfig{}, func(WSEvent) {}, nil, func() map[string]interface{} { return nil })
 
