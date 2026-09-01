@@ -88,6 +88,7 @@ type syncNodesPayload struct {
 type WSClientConfig struct {
 	StatusInterval   time.Duration
 	HandshakeTimeout time.Duration
+	ReadTimeout      time.Duration
 	BackoffInitial   time.Duration
 	BackoffMax       time.Duration
 	MachineID        int
@@ -123,6 +124,9 @@ func NewWSClient(wsURL string, token string, nodeID int, cfg WSClientConfig, onE
 	}
 	if cfg.HandshakeTimeout == 0 {
 		cfg.HandshakeTimeout = 15 * time.Second
+	}
+	if cfg.ReadTimeout == 0 {
+		cfg.ReadTimeout = max(3*cfg.StatusInterval, 30*time.Second)
 	}
 	if cfg.BackoffInitial == 0 {
 		cfg.BackoffInitial = time.Second
@@ -222,11 +226,23 @@ func (w *WSClient) connect(ctx context.Context) error {
 	defer conn.Close()
 
 	conn.SetReadLimit(10 << 20) // 10MB max message size
+	refreshReadDeadline := func() error {
+		return conn.SetReadDeadline(time.Now().Add(w.cfg.ReadTimeout))
+	}
+	conn.SetPongHandler(func(string) error {
+		return refreshReadDeadline()
+	})
+	if err := refreshReadDeadline(); err != nil {
+		return fmt.Errorf("set initial read deadline: %w", err)
+	}
 
 	// Read first message — expect auth.success or error
 	var firstMsg wsMessage
 	if err := conn.ReadJSON(&firstMsg); err != nil {
 		return fmt.Errorf("read auth response: %w", err)
+	}
+	if err := refreshReadDeadline(); err != nil {
+		return fmt.Errorf("refresh read deadline after auth: %w", err)
 	}
 	nlog.Core().Debug("ws recv", "event", firstMsg.Event, "data", string(firstMsg.Data))
 
@@ -268,6 +284,13 @@ func (w *WSClient) connect(ctx context.Context) error {
 		for {
 			var msg wsMessage
 			if err := conn.ReadJSON(&msg); err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+				return
+			}
+			if err := refreshReadDeadline(); err != nil {
 				select {
 				case errCh <- err:
 				default:

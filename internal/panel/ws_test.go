@@ -217,6 +217,71 @@ func TestWSClient_ReconnectOnDisconnect(t *testing.T) {
 	}
 }
 
+func TestWSClient_ReconnectsWhenConnectionGoesSilent(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+
+	var mu sync.Mutex
+	connectCount := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		mu.Lock()
+		connectCount++
+		count := connectCount
+		mu.Unlock()
+
+		if err := conn.WriteJSON(wsMessage{Event: "auth.success"}); err != nil {
+			return
+		}
+
+		if count == 1 {
+			time.Sleep(time.Second)
+			return
+		}
+
+		ticker := time.NewTicker(25 * time.Millisecond)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := conn.WriteJSON(wsMessage{Event: "ping"}); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	host := strings.TrimPrefix(server.URL, "http://")
+	ws := NewWSClient("ws://"+host, "silent-token", 1, WSClientConfig{
+		ReadTimeout:    100 * time.Millisecond,
+		BackoffInitial: 10 * time.Millisecond,
+		BackoffMax:     20 * time.Millisecond,
+	}, func(WSEvent) {}, nil, func() map[string]interface{} { return nil })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	go ws.Run(ctx)
+
+	deadline := time.After(1500 * time.Millisecond)
+	for {
+		mu.Lock()
+		n := connectCount
+		mu.Unlock()
+		if n >= 2 && ws.IsConnected() {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("expected a silent connection to be replaced, got %d connection(s)", n)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
 func TestWSClient_FallbackWhenNoServer(t *testing.T) {
 	ws := NewWSClient("ws://127.0.0.1:19999", "fallback-token", 1, WSClientConfig{}, func(WSEvent) {}, nil, func() map[string]interface{} { return nil })
 
