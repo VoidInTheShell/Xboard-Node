@@ -64,7 +64,9 @@ if systemctl list-unit-files --type=service 2>/dev/null | grep -q '^xboard-node\
     sudo -n systemctl daemon-reload
 fi
 
-sudo -n chown -R beihai:beihai "$TARGET_DIR"
+TARGET_GROUP=$(id -gn beihai)
+[[ "$TARGET_GROUP" =~ ^[A-Za-z0-9._-]+$ ]] || fail "beihai primary group is invalid"
+sudo -n chown -R "beihai:$TARGET_GROUP" "$TARGET_DIR"
 install -m 644 "$RESOLVED_BUNDLE/compose.yaml" "$TARGET_DIR/compose.yaml"
 install -m 644 "$RESOLVED_BUNDLE/config.yml" "$TARGET_DIR/config.yml"
 install -m 600 "$RESOLVED_BUNDLE/runtime.env" "$TARGET_DIR/runtime.env"
