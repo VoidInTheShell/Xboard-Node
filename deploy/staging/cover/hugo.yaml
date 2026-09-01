@@ -1,0 +1,12 @@
+baseURL: https://cdn-p1.sacbridge.dpdns.org/
+languageCode: en-us
+title: Pacific Atlas
+disableKinds:
+  - taxonomy
+  - term
+params:
+  description: Field notes on weather, distance, and the western landscape.
+markup:
+  goldmark:
+    renderer:
+      unsafe: false

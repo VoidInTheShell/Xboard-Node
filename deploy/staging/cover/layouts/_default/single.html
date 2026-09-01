@@ -1,0 +1,12 @@
+{{ define "main" }}
+<article class="article-shell">
+  <header class="article-header">
+    <p class="eyebrow">{{ with .Params.location }}{{ . }} · {{ end }}{{ .Date.Format "02 January 2006" }}</p>
+    <h1>{{ .Title }}</h1>
+    {{ with .Description }}<p class="article-deck">{{ . }}</p>{{ end }}
+  </header>
+  <div class="prose">
+    {{ .Content }}
+  </div>
+</article>
+{{ end }}

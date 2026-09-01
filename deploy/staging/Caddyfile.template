@@ -1,0 +1,44 @@
+{
+	admin off
+	email beihai3body@uegov.org
+}
+
+__NODE_DOMAIN__ {
+	@node_ws {
+		path __NODE_WS_PATH__
+		header Connection *Upgrade*
+		header Upgrade websocket
+	}
+
+	handle @node_ws {
+		reverse_proxy 127.0.0.1:30080 {
+			transport http {
+				versions 1.1
+			}
+		}
+	}
+
+	handle {
+		root * /srv/cover
+		encode zstd gzip
+		file_server
+	}
+
+	handle_errors {
+		rewrite * /404.html
+		file_server
+	}
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

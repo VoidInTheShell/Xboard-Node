@@ -1,0 +1,43 @@
+{{ define "main" }}
+<section class="hero">
+  <div class="contours" aria-hidden="true">
+    <span></span><span></span><span></span><span></span>
+  </div>
+  <div class="hero-copy">
+    <p class="eyebrow">A field notebook · Pacific coast</p>
+    <h1>Distance has<br>a weather of its own.</h1>
+    <p class="lede">Small observations from long roads, dry ridgelines, working harbors, and the quiet minutes before the marine layer lifts.</p>
+  </div>
+  <aside class="field-card" aria-label="Current field note">
+    <p class="field-label">Today’s bearing</p>
+    <p class="bearing">WNW <span>287°</span></p>
+    <dl>
+      <div><dt>Light</dt><dd>Low, silver</dd></div>
+      <div><dt>Air</dt><dd>Cool and clear</dd></div>
+      <div><dt>Notebook</dt><dd>Volume IV</dd></div>
+    </dl>
+  </aside>
+</section>
+
+<section class="dispatch-section" aria-labelledby="dispatch-heading">
+  <div class="section-heading">
+    <p class="eyebrow">Recent observations</p>
+    <h2 id="dispatch-heading">Field dispatches</h2>
+  </div>
+  <div class="dispatch-grid">
+    {{ range first 3 (where site.RegularPages "Section" "dispatches") }}
+    <article class="dispatch-card">
+      <p class="dispatch-meta"><time datetime="{{ .Date.Format "2006-01-02" }}">{{ .Date.Format "02 Jan 2006" }}</time> · {{ .Params.location }}</p>
+      <h3><a href="{{ .RelPermalink }}">{{ .Title }}</a></h3>
+      <p>{{ .Description }}</p>
+      <a class="read-link" href="{{ .RelPermalink }}">Read field note <span aria-hidden="true">→</span></a>
+    </article>
+    {{ end }}
+  </div>
+</section>
+
+<section class="manifesto">
+  <p class="manifesto-kicker">The method</p>
+  <p>Look slowly. Record precisely. Leave the place lighter than you found it.</p>
+</section>
+{{ end }}

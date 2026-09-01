@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="{{ site.Language.LanguageCode }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="{{ with .Description }}{{ . }}{{ else }}{{ site.Params.description }}{{ end }}">
+  <meta name="color-scheme" content="light">
+  {{ hugo.Generator }}
+  <title>{{ if .IsHome }}{{ site.Title }}{{ else }}{{ .Title }} · {{ site.Title }}{{ end }}</title>
+  <link rel="stylesheet" href="{{ "css/site.css" | relURL }}">
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <header class="site-header">
+    <a class="wordmark" href="{{ site.Home.RelPermalink }}" aria-label="Pacific Atlas home">
+      <span class="wordmark-mark" aria-hidden="true">PA</span>
+      <span>Pacific Atlas</span>
+    </a>
+    <nav aria-label="Primary navigation">
+      <a href="{{ "dispatches/" | relURL }}">Dispatches</a>
+      <a href="{{ "about/" | relURL }}">About</a>
+    </nav>
+  </header>
+  <main id="content">
+    {{ block "main" . }}{{ end }}
+  </main>
+  <footer class="site-footer">
+    <p>Pacific Atlas is an independent field notebook from the western edge.</p>
+    <div class="footer-links">
+      <a href="{{ "privacy/" | relURL }}">Privacy</a>
+      <span aria-hidden="true">North 34°</span>
+    </div>
+  </footer>
+</body>
+</html>

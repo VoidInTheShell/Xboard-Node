@@ -1,0 +1,9 @@
+.git
+.github
+deploy
+*.log
+xboard-node
+xbctl
+xboard-node-linux-*
+xbctl-linux-*
+dist

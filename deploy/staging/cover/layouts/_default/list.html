@@ -1,0 +1,20 @@
+{{ define "main" }}
+<section class="archive-shell">
+  <header class="archive-header">
+    <p class="eyebrow">Collected notes</p>
+    <h1>{{ .Title }}</h1>
+    <p>{{ .Description }}</p>
+  </header>
+  <div class="archive-list">
+    {{ range .Pages.ByDate.Reverse }}
+    <article>
+      <time datetime="{{ .Date.Format "2006-01-02" }}">{{ .Date.Format "02 Jan 2006" }}</time>
+      <div>
+        <h2><a href="{{ .RelPermalink }}">{{ .Title }}</a></h2>
+        <p>{{ .Description }}</p>
+      </div>
+    </article>
+    {{ end }}
+  </div>
+</section>
+{{ end }}
