@@ -1,5 +1,6 @@
-# Build stage
-FROM golang:1.26-alpine AS builder
+# Build stage runs on the native GitHub runner and cross-compiles for each
+# requested image platform, avoiding slow QEMU execution of the Go toolchain.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 
 RUN apk add --no-cache git
 
@@ -12,8 +13,10 @@ COPY . .
 
 ARG VERSION=dev
 ARG BUILD_TIME=unknown
+ARG TARGETOS
+ARG TARGETARCH
 
-RUN CGO_ENABLED=0 go build -ldflags "-s -w \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags "-s -w \
     -X main.version=${VERSION} \
     -X main.buildTime=${BUILD_TIME}" \
     -tags "with_quic with_utls with_wireguard with_clash_api" \
