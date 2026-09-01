@@ -7,7 +7,7 @@
 http://__NODE_DOMAIN__ {
 	route {
 		header -Server
-		redir https://__NODE_DOMAIN__{uri} permanent
+		redir https://__NODE_DOMAIN__{uri} 308
 	}
 }
 
