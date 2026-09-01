@@ -28,7 +28,7 @@ FROM caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac523
 # The same immutable image also supplies Caddy for the staging TLS/cover edge.
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates curl tzdata
 
 COPY --from=builder /build/xboard-node /usr/local/bin/xboard-node
 COPY --from=caddy /usr/bin/caddy /usr/bin/caddy

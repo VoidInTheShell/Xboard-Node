@@ -40,6 +40,9 @@ services:
     command: ["run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
     env_file:
       - ./edge.env
+    environment:
+      XDG_CONFIG_HOME: /config
+      XDG_DATA_HOME: /data
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./cover-public:/srv/cover:ro
@@ -58,7 +61,7 @@ services:
         max-size: 5m
         max-file: "3"
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-check-certificate --header=\"Host: $${NODE_DOMAIN}\" -q -O /dev/null https://127.0.0.1/ || exit 1"]
+      test: ["CMD-SHELL", "curl --fail --silent --show-error --resolve \"$${NODE_DOMAIN}:443:127.0.0.1\" \"https://$${NODE_DOMAIN}/\" > /dev/null || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 12

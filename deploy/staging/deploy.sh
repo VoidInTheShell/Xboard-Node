@@ -137,12 +137,18 @@ for _ in $(seq 1 60); do
                     sleep 2
                     continue
                 fi
-                curl --fail --silent --show-error --resolve "$NODE_DOMAIN:443:127.0.0.1" "https://$NODE_DOMAIN/" | grep -q 'Pacific Atlas'
-                missing_status=$(curl --silent --show-error --output /tmp/xboard-node-edge-404.html --write-out '%{http_code}' \
+                curl --fail --silent --show-error --dump-header /tmp/xboard-node-edge-root-headers.txt \
+                    --resolve "$NODE_DOMAIN:443:127.0.0.1" "https://$NODE_DOMAIN/" | grep -q 'Pacific Atlas'
+                grep -qi '^Strict-Transport-Security:' /tmp/xboard-node-edge-root-headers.txt
+                ! grep -qi '^Server:' /tmp/xboard-node-edge-root-headers.txt
+                missing_status=$(curl --silent --show-error --output /tmp/xboard-node-edge-404.html \
+                    --dump-header /tmp/xboard-node-edge-404-headers.txt --write-out '%{http_code}' \
                     --resolve "$NODE_DOMAIN:443:127.0.0.1" "https://$NODE_DOMAIN/not-a-real-field-note")
                 [ "$missing_status" = "404" ] || fail "cover site unknown path did not return 404"
                 grep -q 'This trail ends here' /tmp/xboard-node-edge-404.html
-                rm -f -- /tmp/xboard-node-edge-404.html
+                grep -qi '^Strict-Transport-Security:' /tmp/xboard-node-edge-404-headers.txt
+                ! grep -qi '^Server:' /tmp/xboard-node-edge-404-headers.txt
+                rm -f -- /tmp/xboard-node-edge-root-headers.txt /tmp/xboard-node-edge-404.html /tmp/xboard-node-edge-404-headers.txt
                 sudo -n docker image prune -f >/dev/null
                 log "node authenticated to the panel, applied its configuration, and passed TLS cover checks"
                 log "node deployment complete: $XBOARD_NODE_IMAGE"

@@ -359,10 +359,19 @@ jobs:
         run: |
           set -Eeuo pipefail
           curl --fail --silent --show-error --retry 6 --retry-all-errors --retry-delay 5 "${PANEL_URL}/healthz" > /dev/null
-          curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 5 "${NODE_URL}/" | grep -q 'Pacific Atlas'
-          status=$(curl --silent --show-error --output /tmp/node-404.html --write-out '%{http_code}' "${NODE_URL}/not-a-real-field-note")
+          http_status=$(curl --silent --show-error --output /dev/null --dump-header /tmp/node-http-headers.txt --write-out '%{http_code}' "http://${NODE_DOMAIN}/")
+          test "${http_status}" = "308"
+          ! grep -qi '^Server:' /tmp/node-http-headers.txt
+          curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 5 \
+            --dump-header /tmp/node-root-headers.txt --output /tmp/node-root.html "${NODE_URL}/"
+          grep -q 'Pacific Atlas' /tmp/node-root.html
+          grep -qi '^Strict-Transport-Security:' /tmp/node-root-headers.txt
+          ! grep -qi '^Server:' /tmp/node-root-headers.txt
+          status=$(curl --silent --show-error --output /tmp/node-404.html --dump-header /tmp/node-404-headers.txt --write-out '%{http_code}' "${NODE_URL}/not-a-real-field-note")
           test "${status}" = "404"
           grep -q 'This trail ends here' /tmp/node-404.html
+          grep -qi '^Strict-Transport-Security:' /tmp/node-404-headers.txt
+          ! grep -qi '^Server:' /tmp/node-404-headers.txt
           set +e
           curl --http1.1 --silent --show-error --max-time 5 --dump-header /tmp/node-ws-headers.txt --output /dev/null \
             -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
