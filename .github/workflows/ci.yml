@@ -70,7 +70,7 @@ jobs:
           sed -e 's|__NODE_DOMAIN__|validation.invalid|g' \
             -e 's|__NODE_WS_PATH__|/validation-only-path|g' \
             deploy/staging/Caddyfile.template > "${RUNNER_TEMP}/Caddyfile"
-          caddy_diff=$(docker run --rm \
+          caddy_diff=$(docker run --rm --entrypoint caddy \
             --volume "${RUNNER_TEMP}/Caddyfile:/etc/caddy/Caddyfile:ro" \
             caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d \
             fmt --diff /etc/caddy/Caddyfile)
@@ -79,7 +79,7 @@ jobs:
             echo "Caddyfile.template is not formatted" >&2
             exit 1
           fi
-          docker run --rm \
+          docker run --rm --entrypoint caddy \
             --volume "${RUNNER_TEMP}/Caddyfile:/etc/caddy/Caddyfile:ro" \
             caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d \
             validate --config /etc/caddy/Caddyfile --adapter caddyfile
