@@ -5,6 +5,7 @@
 
 # Config files (may contain secrets)
 config.yml
+!/deploy/staging/config.yml
 
 # Generated sing-box config
 singbox.json

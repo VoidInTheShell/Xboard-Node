@@ -1,0 +1,12 @@
+health_port: 65530
+
+kernel:
+  type: singbox
+  log_level: warn
+
+log:
+  level: info
+
+runtime:
+  gomemlimit: 192MiB
+  gogc: 50
