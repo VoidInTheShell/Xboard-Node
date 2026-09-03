@@ -20,9 +20,11 @@ import (
 
 // nodeHandle tracks a running node service.
 type nodeHandle struct {
-	cancel  context.CancelFunc
-	done    chan struct{}
-	mailbox *controlplane.NodeMailbox
+	cancel               context.CancelFunc
+	done                 chan struct{}
+	mailbox              *controlplane.NodeMailbox
+	effectiveKernel      config.KernelConfig
+	effectiveKernelReady bool
 }
 
 // Orchestrator manages all nodes bound to a panel machine. It:
@@ -124,7 +126,8 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 	nodeCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	mb := controlplane.NewNodeMailbox()
-	o.nodes[mn.ID] = &nodeHandle{cancel: cancel, done: done, mailbox: mb}
+	handle := &nodeHandle{cancel: cancel, done: done, mailbox: mb}
+	o.nodes[mn.ID] = handle
 	o.mu.Unlock()
 
 	o.eventsMu.Lock()
@@ -145,6 +148,10 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 			nodeCfg.Kernel.Type = resolved
 		}
 	}
+	o.mu.Lock()
+	handle.effectiveKernel = nodeCfg.Kernel
+	handle.effectiveKernelReady = true
+	o.mu.Unlock()
 	// Reset cached ETag so the subsequent GetConfig in Initial() gets a full response.
 	perNodeClient.ResetConfigETag()
 
@@ -321,7 +328,33 @@ func (o *Orchestrator) onWSEvent(event panel.WSEvent) {
 		return
 	}
 
-	translated, err := controlplane.TranslateWSEvent(event, o.cfg.Kernel)
+	// Machine nodes can use different effective kernels. In particular, an
+	// XHTTP node is auto-switched from the machine's default sing-box kernel to
+	// Xray during startNode. Translate dynamic events with that resolved kernel
+	// so they follow the same validation path as the initial REST snapshot.
+	o.mu.Lock()
+	handle, known := o.nodes[nodeID]
+	var effectiveKernel config.KernelConfig
+	ready := false
+	if known {
+		effectiveKernel = handle.effectiveKernel
+		ready = handle.effectiveKernelReady
+	}
+	o.mu.Unlock()
+	if !known {
+		nlog.Core().Debug("machine ws event for unknown node", "node_id", nodeID, "type", event.Type)
+		return
+	}
+	if !ready {
+		// The initial REST fetch will establish a complete baseline. Dropping an
+		// event that arrives before transport-based kernel resolution avoids
+		// validating an XHTTP config against the wrong global kernel.
+		nlog.Core().Debug("machine ws event before effective kernel is ready, dropping",
+			"node_id", nodeID, "type", event.Type)
+		return
+	}
+
+	translated, err := controlplane.TranslateWSEvent(event, effectiveKernel)
 	if err != nil {
 		nlog.Core().Warn("machine ws event translation failed",
 			"type", event.Type, "node_id", nodeID, "error", err)
