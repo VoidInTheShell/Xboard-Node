@@ -45,6 +45,15 @@ func NodeSpecFromPanel(nc *panel.NodeConfig) *NodeSpec {
 		}
 	}
 
+	var masquerade *Hysteria2Masquerade
+	if nc.Masquerade != nil {
+		masquerade = &Hysteria2Masquerade{
+			Type:        nc.Masquerade.Type,
+			URL:         nc.Masquerade.URL,
+			RewriteHost: nc.Masquerade.RewriteHost,
+		}
+	}
+
 	routes := make([]RouteRule, 0, len(nc.Routes))
 	for _, route := range nc.Routes {
 		routes = append(routes, RouteRule{
@@ -116,6 +125,7 @@ func NodeSpecFromPanel(nc *panel.NodeConfig) *NodeSpec {
 		DownMbps:            nc.DownMbps,
 		Obfs:                nc.Obfs,
 		ObfsPassword:        nc.ObfsPassword,
+		Masquerade:          masquerade,
 		CongestionControl:   nc.CongestionControl,
 		PaddingScheme:       string(nc.PaddingScheme),
 		Transport:           nc.Transport,
@@ -181,6 +191,15 @@ func (n *NodeSpec) ToPanel() *panel.NodeConfig {
 				UpMbps:   n.Multiplex.Brutal.UpMbps,
 				DownMbps: n.Multiplex.Brutal.DownMbps,
 			}
+		}
+	}
+
+	var masquerade *panel.Hysteria2Masquerade
+	if n.Masquerade != nil {
+		masquerade = &panel.Hysteria2Masquerade{
+			Type:        n.Masquerade.Type,
+			URL:         n.Masquerade.URL,
+			RewriteHost: n.Masquerade.RewriteHost,
 		}
 	}
 
@@ -255,6 +274,7 @@ func (n *NodeSpec) ToPanel() *panel.NodeConfig {
 		DownMbps:            n.DownMbps,
 		Obfs:                n.Obfs,
 		ObfsPassword:        n.ObfsPassword,
+		Masquerade:          masquerade,
 		CongestionControl:   n.CongestionControl,
 		PaddingScheme:       panel.StringOrArray(n.PaddingScheme),
 		Transport:           n.Transport,

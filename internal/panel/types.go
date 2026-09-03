@@ -71,8 +71,8 @@ type MachineNode struct {
 
 // MachineNodesResponse is the response from GET /api/v2/server/machine/nodes.
 type MachineNodesResponse struct {
-	Nodes      []MachineNode      `json:"nodes"`
-	BaseConfig MachineBaseConfig  `json:"base_config"`
+	Nodes      []MachineNode     `json:"nodes"`
+	BaseConfig MachineBaseConfig `json:"base_config"`
 }
 
 // MachineBaseConfig holds polling intervals for machine mode.
@@ -122,11 +122,12 @@ type NodeConfig struct {
 	ServerName string `json:"server_name,omitempty"`
 
 	// Hysteria
-	Version      int    `json:"version,omitempty"`
-	UpMbps       int    `json:"up_mbps,omitempty"`
-	DownMbps     int    `json:"down_mbps,omitempty"`
-	Obfs         string `json:"obfs,omitempty"`
-	ObfsPassword string `json:"obfs-password,omitempty"`
+	Version      int                  `json:"version,omitempty"`
+	UpMbps       int                  `json:"up_mbps,omitempty"`
+	DownMbps     int                  `json:"down_mbps,omitempty"`
+	Obfs         string               `json:"obfs,omitempty"`
+	ObfsPassword string               `json:"obfs-password,omitempty"`
+	Masquerade   *Hysteria2Masquerade `json:"masquerade,omitempty"`
 
 	// TUIC
 	CongestionControl string `json:"congestion_control,omitempty"`
@@ -159,6 +160,15 @@ func (nc *NodeConfig) GetProxyProtocol() bool {
 		}
 	}
 	return false
+}
+
+// Hysteria2Masquerade defines the safe proxy-backed decoy supported by Xboard.
+// The upstream sing-box core also supports file and inline responses, but those
+// modes are intentionally not accepted by the control plane yet.
+type Hysteria2Masquerade struct {
+	Type        string `json:"type"`
+	URL         string `json:"url"`
+	RewriteHost bool   `json:"rewrite_host,omitempty"`
 }
 
 type MultiplexConfig struct {

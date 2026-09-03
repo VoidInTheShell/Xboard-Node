@@ -655,6 +655,16 @@ func buildHysteria(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel
 				"password": nc.ObfsPassword,
 			}
 		}
+		if nc.Masquerade != nil {
+			masquerade := M{
+				"type": nc.Masquerade.Type,
+				"url":  nc.Masquerade.URL,
+			}
+			if nc.Masquerade.RewriteHost {
+				masquerade["rewrite_host"] = true
+			}
+			base["masquerade"] = masquerade
+		}
 	} else {
 		base["type"] = "hysteria"
 

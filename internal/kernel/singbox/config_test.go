@@ -352,6 +352,32 @@ func TestBuildInbound_Hysteria2_WithObfs(t *testing.T) {
 	assertMapValue(t, obfs, "password", "secret")
 }
 
+func TestBuildInbound_Hysteria2_WithProxyMasquerade(t *testing.T) {
+	nc := &panel.NodeConfig{
+		Protocol:   "hysteria",
+		ServerPort: 444,
+		Version:    2,
+		Masquerade: &panel.Hysteria2Masquerade{
+			Type:        "proxy",
+			URL:         "https://www.example.com/",
+			RewriteHost: true,
+		},
+	}
+	inbound := buildInbound(testNodeSpec(nc), testUsers, kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")})
+	masquerade := inbound["masquerade"].(M)
+	assertMapValue(t, masquerade, "type", "proxy")
+	assertMapValue(t, masquerade, "url", "https://www.example.com/")
+	assertMapValue(t, masquerade, "rewrite_host", true)
+}
+
+func TestBuildInbound_Hysteria2_WithoutMasquerade(t *testing.T) {
+	nc := &panel.NodeConfig{Protocol: "hysteria", ServerPort: 444, Version: 2}
+	inbound := buildInbound(testNodeSpec(nc), testUsers, kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")})
+	if _, exists := inbound["masquerade"]; exists {
+		t.Fatal("expected no masquerade when it is not configured")
+	}
+}
+
 func TestBuildInbound_Hysteria1(t *testing.T) {
 	nc := &panel.NodeConfig{
 		Protocol:   "hysteria",

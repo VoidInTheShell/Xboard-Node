@@ -82,3 +82,37 @@ func TestNodeSpecFromPanelValidated(t *testing.T) {
 		}
 	})
 }
+
+func TestHysteria2MasqueradePanelRoundTrip(t *testing.T) {
+	input := &panel.NodeConfig{
+		Protocol:   "hysteria",
+		ServerPort: 443,
+		Version:    2,
+		Masquerade: &panel.Hysteria2Masquerade{
+			Type:        "proxy",
+			URL:         "https://www.example.com/",
+			RewriteHost: true,
+		},
+	}
+
+	node, err := NodeSpecFromPanelValidated(input, config.KernelConfig{Type: "singbox"})
+	if err != nil {
+		t.Fatalf("NodeSpecFromPanelValidated: %v", err)
+	}
+	output := node.ToPanel()
+	if output.Masquerade == nil || *output.Masquerade != *input.Masquerade {
+		t.Fatalf("masquerade round trip: got %#v, want %#v", output.Masquerade, input.Masquerade)
+	}
+}
+
+func TestHysteria2MasqueradeRejectsUnsafeURL(t *testing.T) {
+	_, err := NodeSpecFromPanelValidated(&panel.NodeConfig{
+		Protocol:   "hysteria",
+		ServerPort: 443,
+		Version:    2,
+		Masquerade: &panel.Hysteria2Masquerade{Type: "proxy", URL: "file:///srv/decoy"},
+	}, config.KernelConfig{Type: "singbox"})
+	if err == nil || !strings.Contains(err.Error(), "must use http or https") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

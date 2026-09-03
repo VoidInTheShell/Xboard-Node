@@ -37,6 +37,7 @@ type NodeSpec struct {
 	DownMbps     int
 	Obfs         string
 	ObfsPassword string
+	Masquerade   *Hysteria2Masquerade
 
 	CongestionControl string
 	PaddingScheme     string
@@ -45,6 +46,12 @@ type NodeSpec struct {
 
 	Multiplex           *MultiplexConfig
 	AcceptProxyProtocol bool
+}
+
+type Hysteria2Masquerade struct {
+	Type        string
+	URL         string
+	RewriteHost bool
 }
 
 type OutboundConfig struct {

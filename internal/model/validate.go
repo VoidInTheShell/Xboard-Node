@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/cedar2025/xboard-node/internal/config"
@@ -38,6 +39,29 @@ func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 	}
 	if err := validateTransportKernel(n.Network, kernelType); err != nil {
 		return err
+	}
+	if err := validateHysteria2Masquerade(n, kernelType); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateHysteria2Masquerade(n *NodeSpec, kernelType string) error {
+	if n.Masquerade == nil {
+		return nil
+	}
+	if strings.ToLower(strings.TrimSpace(n.Protocol)) != "hysteria" || n.Version != 2 {
+		return fmt.Errorf("masquerade is only supported for hysteria2 nodes")
+	}
+	if kernelType != "singbox" {
+		return fmt.Errorf("hysteria2 masquerade requires singbox kernel")
+	}
+	if strings.ToLower(strings.TrimSpace(n.Masquerade.Type)) != "proxy" {
+		return fmt.Errorf("unsupported hysteria2 masquerade type %q", n.Masquerade.Type)
+	}
+	proxyURL, err := url.ParseRequestURI(strings.TrimSpace(n.Masquerade.URL))
+	if err != nil || proxyURL.Host == "" || (proxyURL.Scheme != "http" && proxyURL.Scheme != "https") {
+		return fmt.Errorf("hysteria2 masquerade proxy URL must use http or https")
 	}
 	return nil
 }
