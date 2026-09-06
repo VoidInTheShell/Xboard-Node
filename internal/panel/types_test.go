@@ -117,6 +117,41 @@ func TestNodeConfig_UnmarshalFullPanelResponse(t *testing.T) {
 	}
 }
 
+func TestDecodeWeakRawPreservesNativePolicyObject(t *testing.T) {
+	var raw map[string]interface{}
+	if err := json.Unmarshal([]byte(`{
+		"protocol": "vless",
+		"xray_config": {
+			"policy": {
+				"levels": {
+					"0": {"handshake": 8, "connIdle": 120}
+				}
+			}
+		}
+	}`), &raw); err != nil {
+		t.Fatalf("decode raw JSON: %v", err)
+	}
+	var cfg NodeConfig
+	if err := decodeWeakRaw(raw, &cfg); err != nil {
+		t.Fatalf("decodeWeakRaw: %v", err)
+	}
+	policy, ok := cfg.XrayConfig["policy"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("policy type = %T, want map[string]interface{}; value=%#v", cfg.XrayConfig["policy"], cfg.XrayConfig["policy"])
+	}
+	levels, ok := policy["levels"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("levels type = %T, want map[string]interface{}; value=%#v", policy["levels"], policy["levels"])
+	}
+	level0, ok := levels["0"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("level 0 type = %T, want map[string]interface{}; value=%#v", levels["0"], levels["0"])
+	}
+	if level0["handshake"] != float64(8) || level0["connIdle"] != float64(120) {
+		t.Fatalf("policy values changed: %#v", level0)
+	}
+}
+
 func TestUsersResponse_Unmarshal(t *testing.T) {
 	input := `{
 		"users": [

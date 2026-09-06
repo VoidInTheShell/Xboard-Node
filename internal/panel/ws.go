@@ -214,7 +214,9 @@ func (w *WSClient) connect(ctx context.Context) error {
 	}
 	u.RawQuery = q.Encode()
 
-	nlog.Core().Debug("ws connecting", "url", u.String())
+	// Do not log u.String(): the URL carries the authentication token in its
+	// query string. The host/path are sufficient for connection diagnostics.
+	nlog.Core().Debug("ws connecting", "host", u.Host, "path", u.EscapedPath())
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: w.cfg.HandshakeTimeout,
@@ -244,7 +246,7 @@ func (w *WSClient) connect(ctx context.Context) error {
 	if err := refreshReadDeadline(); err != nil {
 		return fmt.Errorf("refresh read deadline after auth: %w", err)
 	}
-	nlog.Core().Debug("ws recv", "event", firstMsg.Event, "data", string(firstMsg.Data))
+	nlog.Core().Debug("ws recv", "event", firstMsg.Event, "bytes", len(firstMsg.Data))
 
 	if firstMsg.Event == "error" {
 		var errData struct {
@@ -297,7 +299,7 @@ func (w *WSClient) connect(ctx context.Context) error {
 				}
 				return
 			}
-			nlog.Core().Debug("ws recv", "event", msg.Event, "data", string(msg.Data))
+			nlog.Core().Debug("ws recv", "event", msg.Event, "bytes", len(msg.Data))
 			w.handleMessage(msg)
 			if msg.Event == "ping" {
 				select {
@@ -315,6 +317,11 @@ func (w *WSClient) connect(ctx context.Context) error {
 			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			conn.WriteMessage(websocket.CloseMessage,
 				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+			// Closing the connection before waiting for the reader guarantees
+			// that shutdown does not wait for the full read deadline. Machine
+			// mode uses this path when a panel disables a machine and must be
+			// able to replace the WS client on the next successful discovery.
+			_ = conn.Close()
 			<-done
 			return nil
 
@@ -346,7 +353,7 @@ func (w *WSClient) connect(ctx context.Context) error {
 
 		case msg := <-writeCh:
 			// Perform the actual network write asynchronously in this loop.
-			nlog.Core().Debug("ws send", "event", msg.Event, "data", string(msg.Data))
+			nlog.Core().Debug("ws send", "event", msg.Event, "bytes", len(msg.Data))
 			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := conn.WriteJSON(msg); err != nil {
 				return fmt.Errorf("write: %w", err)

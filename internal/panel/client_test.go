@@ -1,7 +1,9 @@
 package panel
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -97,6 +99,23 @@ func TestGetConfig_ServerError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for 500 response")
 	}
+	var statusErr *HTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("GetConfig error = %T %v, want HTTPStatusError 500", err, err)
+	}
+}
+
+func TestGetConfig_AccessDeniedPreservesHTTPStatus(t *testing.T) {
+	ts, client := newTestServer(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "node disabled", http.StatusForbidden)
+	})
+	defer ts.Close()
+
+	_, err := client.GetConfig()
+	var statusErr *HTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusForbidden {
+		t.Fatalf("GetConfig error = %T %v, want HTTPStatusError 403", err, err)
+	}
 }
 
 func TestGetUsers_Success(t *testing.T) {
@@ -149,6 +168,29 @@ func TestGetUsers_NotModified(t *testing.T) {
 	}
 	if users != nil {
 		t.Error("expected nil for 304")
+	}
+}
+
+func TestGetUsers_AccessDeniedPreservesHTTPStatus(t *testing.T) {
+	ts, client := newTestServer(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "node disabled", http.StatusUnauthorized)
+	})
+	defer ts.Close()
+
+	_, err := client.GetUsers()
+	var statusErr *HTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GetUsers error = %T %v, want HTTPStatusError 401", err, err)
+	}
+}
+
+func TestReportContextHonorsCancellation(t *testing.T) {
+	client := NewClient(config.PanelConfig{URL: "http://127.0.0.1:1", Token: "test-token"})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := client.ReportContext(ctx, nil, nil, nil, 0, [2]uint64{}, [2]uint64{}, [2]uint64{}, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReportContext error = %v, want context canceled", err)
 	}
 }
 

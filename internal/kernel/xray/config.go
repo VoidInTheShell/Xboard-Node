@@ -68,7 +68,12 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 		"outbounds": outbounds,
 	}
 
-	inbound := buildInbound(nc, users, tc)
+	// Native managed-inbound settings are authoritative for the fields they
+	// provide. Apply the effective TLS/security and VLESS settings while
+	// generating the XBoard-owned portion so generated certificates and client
+	// accounts agree with the native override before the final deep merge.
+	buildNC := nativeManagedBuildSpec(nc)
+	inbound := buildInbound(buildNC, users, tc)
 	if inbound != nil {
 		cfg["inbounds"] = []M{inbound}
 	} else {
@@ -81,7 +86,141 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 	cfg["routing"] = buildRouting(nc.Routes, nc.CustomRouteRules, mergeRouteList(nc.CustomRoutes, kcfg.CustomRoute))
 
 	mergeCustomXray(cfg, kcfg)
+	if len(nc.XrayConfig) > 0 {
+		mergeNativeConfig(cfg, nc)
+		injectNativeManagedCertificate(cfg, nc, tc)
+	}
 	return cfg
+}
+
+// injectNativeManagedCertificate fills the certificate material for a native
+// managed-inbound TLS override. Protocol builders that already use the
+// NodeSpec TLS flag produce this block themselves; this fallback also covers
+// protocols such as shadowsocks whose legacy builder does not inspect TLS.
+// An explicitly supplied native tlsSettings.certificates value always wins,
+// including an intentionally empty value.
+func injectNativeManagedCertificate(cfg M, nc *model.NodeSpec, tc kernel.TLSCert) {
+	if nc == nil || !tc.HasCert() {
+		return
+	}
+	stream := nativeManagedInboundStreamSettings(nc)
+	security, _ := stream["security"].(string)
+	if !strings.EqualFold(strings.TrimSpace(security), "tls") {
+		return
+	}
+	inbounds, ok := cfg["inbounds"].([]M)
+	if !ok || len(inbounds) == 0 {
+		return
+	}
+	inbound, ok := asNativeMap(inbounds[0])
+	if !ok {
+		return
+	}
+	managedStream, _ := asNativeMap(inbound["streamSettings"])
+	if managedStream == nil {
+		managedStream = M{}
+		inbound["streamSettings"] = managedStream
+	}
+	tlsSettings, exists := asNativeMap(managedStream["tlsSettings"])
+	if !exists {
+		tlsSettings = M{}
+		managedStream["tlsSettings"] = tlsSettings
+	}
+	if _, exists := tlsSettings["certificates"]; exists {
+		return
+	}
+	tlsSettings["certificates"] = []M{{
+		"certificate": []string{string(tc.CertPEM)},
+		"key":         []string{string(tc.KeyPEM)},
+	}}
+}
+
+// nativeManagedBuildSpec returns a shallow NodeSpec copy when the first
+// native inbound patch changes fields that affect generated managed settings.
+// The caller-owned NodeSpec and its nested maps are never mutated.
+func nativeManagedBuildSpec(nc *model.NodeSpec) *model.NodeSpec {
+	if nc == nil {
+		return nil
+	}
+	stream := nativeManagedInboundStreamSettings(nc)
+	security, _ := stream["security"].(string)
+	security = strings.ToLower(strings.TrimSpace(security))
+
+	flow, flowSet := nativeManagedSettingString(nc, "flow")
+	decryption, decryptionSet := nativeManagedSettingString(nc, "decryption")
+	needsCopy := false
+	copySpec := *nc
+	switch security {
+	case "tls":
+		if copySpec.TLS != 1 {
+			copySpec.TLS = 1
+			needsCopy = true
+		}
+	case "reality":
+		if copySpec.TLS != 2 {
+			copySpec.TLS = 2
+			needsCopy = true
+		}
+	case "none":
+		if copySpec.TLS != 0 {
+			copySpec.TLS = 0
+			needsCopy = true
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(copySpec.Protocol), "vless") {
+		if flowSet && copySpec.Flow != flow {
+			copySpec.Flow = flow
+			needsCopy = true
+		}
+		if decryptionSet && copySpec.Decryption != decryption {
+			copySpec.Decryption = decryption
+			needsCopy = true
+		}
+	}
+	if !needsCopy {
+		return nc
+	}
+	return &copySpec
+}
+
+func nativeManagedInboundStreamSettings(nc *model.NodeSpec) M {
+	if nc == nil {
+		return nil
+	}
+	managed, ok := nativeManagedInboundPatch(nc)
+	if !ok {
+		return nil
+	}
+	stream, _ := asNativeMap(managed["streamSettings"])
+	return stream
+}
+
+func nativeManagedInboundSettings(nc *model.NodeSpec) M {
+	managed, ok := nativeManagedInboundPatch(nc)
+	if !ok {
+		return nil
+	}
+	settings, _ := asNativeMap(managed["settings"])
+	return settings
+}
+
+func nativeManagedInboundPatch(nc *model.NodeSpec) (M, bool) {
+	if nc == nil {
+		return nil, false
+	}
+	entries, ok := nativeSlice(nc.XrayConfig["inbounds"])
+	if !ok || len(entries) == 0 {
+		return nil, false
+	}
+	managed, ok := asNativeMap(entries[0])
+	return managed, ok
+}
+
+func nativeManagedSettingString(nc *model.NodeSpec, key string) (string, bool) {
+	settings := nativeManagedInboundSettings(nc)
+	value, ok := settings[key]
+	text, textOK := value.(string)
+	return text, ok && textOK
 }
 
 // outboundConfigToXray converts a structured OutboundConfig (from the panel)
@@ -298,8 +437,13 @@ func buildTrojan(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.T
 	// we should enable a default TLS config to ensure the inbound can start.
 	ss, _ := base["streamSettings"].(M)
 	if security, ok := ss["security"].(string); !ok || (security != "tls" && security != "reality") {
-		nc.TLS = 1 // Force internal state to trigger TLS build in applyStreamSettings
-		applyStreamSettings(base, nc, tc)
+		// Do not mutate the panel-owned NodeSpec while applying this fallback.
+		// The same snapshot is retained for config hashing and last-good
+		// rollback, so changing nc.TLS here could make a failed reload appear
+		// successful on the next attempt.
+		fallback := *nc
+		fallback.TLS = 1 // Force internal state to trigger TLS build
+		applyStreamSettings(base, &fallback, tc)
 	}
 
 	return base

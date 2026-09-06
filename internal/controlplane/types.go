@@ -81,6 +81,13 @@ type Sink interface {
 	SupportsDeviceReports() bool
 }
 
+// ContextReporter is an optional shutdown-aware extension to Sink. Services
+// use it for the final report so a panel request cannot hold kernel teardown
+// behind the normal API timeout.
+type ContextReporter interface {
+	ReportContext(ctx context.Context, payload ReportPayload) error
+}
+
 type ControlPlane interface {
 	Source
 	Sink

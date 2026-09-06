@@ -99,6 +99,9 @@ type NodeConfig struct {
 	CustomOutbounds  []OutboundConfig  `json:"custom_outbounds,omitempty"`
 	CustomRoutes     []map[string]any  `json:"custom_routes,omitempty"`
 	CustomRouteRules []CustomRouteRule `json:"custom_route_rules,omitempty"`
+	XrayConfig       map[string]any    `json:"xray_config,omitempty"`
+	ConfigRevision   int64             `json:"config_revision,omitempty"`
+	ConfigHash       string            `json:"config_hash,omitempty"`
 
 	// Certificate settings (Xboard extension)
 	CertConfig *CertConfig `json:"cert_config,omitempty"`

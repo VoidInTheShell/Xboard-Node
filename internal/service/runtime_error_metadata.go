@@ -1,0 +1,187 @@
+package service
+
+import (
+	stderrors "errors"
+	"strings"
+
+	"github.com/cedar2025/xboard-node/internal/config"
+	"github.com/cedar2025/xboard-node/internal/model"
+)
+
+// runtimeValidationError is used for checks that must run before an Xray
+// instance is constructed (for example, certificate availability). It has
+// the same metadata contract as kernel errors, but keeps the raw text local
+// for diagnostics.
+type runtimeValidationError struct {
+	path   string
+	reason string
+	err    error
+}
+
+func (e *runtimeValidationError) Error() string {
+	if e == nil || e.err == nil {
+		return "node runtime validation failed"
+	}
+	return e.err.Error()
+}
+
+func (e *runtimeValidationError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+func (e *runtimeValidationError) ConfigErrorPath() string {
+	if e == nil {
+		return ""
+	}
+	return e.path
+}
+
+func (e *runtimeValidationError) ConfigErrorReason() string {
+	if e == nil {
+		return ""
+	}
+	return e.reason
+}
+
+func annotateRuntimeValidationError(spec *model.NodeSpec, err error) error {
+	if err == nil {
+		return nil
+	}
+	if path, reason := existingRuntimeErrorMetadata(err); path != "" || reason != "" {
+		return err
+	}
+	path, reason := classifyRuntimeValidationError(spec, err)
+	return &runtimeValidationError{path: path, reason: reason, err: err}
+}
+
+func existingRuntimeErrorMetadata(err error) (string, string) {
+	if err == nil {
+		return "", ""
+	}
+	var pathErr interface{ ConfigErrorPath() string }
+	var reasonErr interface{ ConfigErrorReason() string }
+	var path, reason string
+	if stderrors.As(err, &pathErr) {
+		path = pathErr.ConfigErrorPath()
+	}
+	if stderrors.As(err, &reasonErr) {
+		reason = reasonErr.ConfigErrorReason()
+	}
+	return path, reason
+}
+
+func classifyRuntimeValidationError(spec *model.NodeSpec, err error) (string, string) {
+	if err == nil {
+		return "", "unknown"
+	}
+	message := strings.ToLower(err.Error())
+
+	switch {
+	case strings.Contains(message, "not supported by kernel") && strings.Contains(message, "protocol"):
+		return "protocol", "unsupported_protocol"
+	case strings.Contains(message, "requires tls certificate files"):
+		return runtimeCertificatePath(spec), "missing_required_field"
+	case strings.Contains(message, "dns cert mode requires cert_config.dns_provider"):
+		return "cert_config.dns_provider", "missing_required_field"
+	case strings.Contains(message, "unsupported cert_config.dns_provider"):
+		return "cert_config.dns_provider", "invalid_value"
+	case strings.Contains(message, "reality tls requires"):
+		return realityValidationPath(message), "missing_required_field"
+	default:
+		return "", "unknown"
+	}
+}
+
+func runtimeCertificatePath(spec *model.NodeSpec) string {
+	if spec == nil || spec.CertConfig == nil {
+		return "cert_config"
+	}
+	cfg := spec.CertConfig
+	switch strings.ToLower(strings.TrimSpace(cfg.CertMode)) {
+	case "file":
+		if strings.TrimSpace(cfg.CertFile) == "" {
+			return "cert_config.cert_file"
+		}
+		if strings.TrimSpace(cfg.KeyFile) == "" {
+			return "cert_config.key_file"
+		}
+	case "content":
+		if strings.TrimSpace(cfg.CertContent) == "" {
+			return "cert_config.cert_content"
+		}
+		if strings.TrimSpace(cfg.KeyContent) == "" {
+			return "cert_config.key_content"
+		}
+	}
+	return "cert_config"
+}
+
+func annotateCertificateReconfigureError(cfg *config.CertConfig, err error) error {
+	if err == nil {
+		return nil
+	}
+	path := "cert_config.cert_mode"
+	reason := "invalid_value"
+	message := strings.ToLower(err.Error())
+	mode := ""
+	if cfg != nil {
+		mode = strings.ToLower(strings.TrimSpace(cfg.CertMode))
+	}
+	switch mode {
+	case "file":
+		path = "cert_config.cert_file"
+		if strings.Contains(message, "key file") {
+			path = "cert_config.key_file"
+		}
+		if strings.Contains(message, "file:") || strings.Contains(message, "no such file") || strings.Contains(message, "permission denied") {
+			reason = "certificate_file_unreadable"
+		}
+	case "content":
+		path = "cert_config.cert_content"
+		if strings.Contains(message, "private key") || strings.Contains(message, "key_content") {
+			path = "cert_config.key_content"
+		}
+	case "http", "dns":
+		path = "cert_config.domain"
+		if strings.Contains(message, "dns_provider") || strings.Contains(message, "dns provider") {
+			path = "cert_config.dns_provider"
+		}
+		if strings.Contains(message, "cert dir") || strings.Contains(message, "storage") {
+			path = "cert_config.cert_dir"
+		}
+	}
+	return &runtimeValidationError{path: path, reason: reason, err: err}
+}
+
+func realityValidationPath(message string) string {
+	const prefix = "reality tls requires "
+	index := strings.Index(message, prefix)
+	if index < 0 {
+		return ""
+	}
+	path := strings.TrimSpace(message[index+len(prefix):])
+	// The server-name/dest error is intentionally ambiguous; neither field is
+	// preferred by the runtime, so return no path rather than focus the wrong
+	// editor control. Other paths are generated by this package and allow-listed
+	// here before they can reach a panel report.
+	if strings.Contains(path, " or ") {
+		return ""
+	}
+	for _, allowed := range []string{
+		"tls_settings",
+		"tls_settings.private_key",
+		"tls_settings.server_name",
+		"tls_settings.dest",
+		"xray_config.inbounds[0].streamSettings.realitySettings.privateKey",
+		"xray_config.inbounds[0].streamSettings.realitySettings.serverNames",
+		"xray_config.inbounds[0].streamSettings.realitySettings.dest",
+	} {
+		if path == allowed {
+			return path
+		}
+	}
+	return ""
+}

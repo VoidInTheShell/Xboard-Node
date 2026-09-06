@@ -2,6 +2,7 @@ package panel
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,6 +42,26 @@ type Client struct {
 
 	apiSuccess atomic.Uint64
 	apiFailure atomic.Uint64
+}
+
+// HTTPStatusError reports an HTTP response that the panel rejected.  Keeping
+// the status code structured lets machine mode distinguish a temporary
+// authorization/lifecycle transition (401/403) from a malformed response or
+// an unavailable panel without parsing log strings.
+type HTTPStatusError struct {
+	Operation  string
+	StatusCode int
+	Body       string
+}
+
+func (e *HTTPStatusError) Error() string {
+	if e == nil {
+		return "panel HTTP status error"
+	}
+	if e.Body == "" {
+		return fmt.Sprintf("%s status %d", e.Operation, e.StatusCode)
+	}
+	return fmt.Sprintf("%s status %d: %s", e.Operation, e.StatusCode, e.Body)
 }
 
 // NewClient creates a new panel API client.
@@ -110,6 +131,24 @@ func (c *Client) Report(traffic map[int][2]int64, alive map[int][]string, online
 	cpu float64, mem, swap, disk [2]uint64,
 	metrics map[string]interface{},
 ) error {
+	return c.report(context.Background(), traffic, alive, online, cpu, mem, swap, disk, metrics)
+}
+
+// ReportContext is the bounded-report variant used while a node is shutting
+// down. The regular Report method intentionally keeps the client's normal
+// request timeout; shutdown must be able to cancel an unavailable panel
+// without delaying kernel teardown.
+func (c *Client) ReportContext(ctx context.Context, traffic map[int][2]int64, alive map[int][]string, online map[int]int,
+	cpu float64, mem, swap, disk [2]uint64,
+	metrics map[string]interface{},
+) error {
+	return c.report(ctx, traffic, alive, online, cpu, mem, swap, disk, metrics)
+}
+
+func (c *Client) report(ctx context.Context, traffic map[int][2]int64, alive map[int][]string, online map[int]int,
+	cpu float64, mem, swap, disk [2]uint64,
+	metrics map[string]interface{},
+) error {
 	payload := make(map[string]interface{})
 
 	if len(traffic) > 0 {
@@ -166,7 +205,7 @@ func (c *Client) Report(traffic map[int][2]int64, alive map[int][]string, online
 		payload["metrics"] = metrics
 	}
 
-	return c.postJSON("/api/v2/server/report", payload)
+	return c.postJSONContext(ctx, "/api/v2/server/report", payload)
 }
 
 // decodeWeakRaw decodes an interface (from JSON map) into a struct using weak type conversion.
@@ -228,7 +267,11 @@ func (c *Client) GetConfig() (*NodeConfig, error) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, body)
+		return nil, &HTTPStatusError{
+			Operation:  "get config",
+			StatusCode: resp.StatusCode,
+			Body:       string(body),
+		}
 	}
 
 	var raw map[string]interface{}
@@ -266,7 +309,11 @@ func (c *Client) GetUsers() ([]User, error) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, body)
+		return nil, &HTTPStatusError{
+			Operation:  "get users",
+			StatusCode: resp.StatusCode,
+			Body:       string(body),
+		}
 	}
 
 	var usersResp UsersResponse
@@ -331,7 +378,11 @@ func (c *Client) GetMachineNodes() (*MachineNodesResponse, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("machine nodes status %d: %s", resp.StatusCode, body)
+		return nil, &HTTPStatusError{
+			Operation:  "machine nodes",
+			StatusCode: resp.StatusCode,
+			Body:       string(body),
+		}
 	}
 
 	var out MachineNodesResponse
@@ -392,6 +443,10 @@ func (c *Client) authQuery() url.Values {
 
 // postJSON marshals a map payload (with auth fields injected) and POSTs it.
 func (c *Client) postJSON(path string, payload map[string]interface{}) error {
+	return c.postJSONContext(context.Background(), path, payload)
+}
+
+func (c *Client) postJSONContext(ctx context.Context, path string, payload map[string]interface{}) error {
 	c.injectAuth(payload)
 
 	body, err := json.Marshal(payload)
@@ -399,7 +454,7 @@ func (c *Client) postJSON(path string, payload map[string]interface{}) error {
 		return fmt.Errorf("marshal: %w", err)
 	}
 
-	resp, err := c.doRequest("POST", path, body, "")
+	resp, err := c.doRequestContext(ctx, "POST", path, body, "")
 	if err != nil {
 		return fmt.Errorf("post %s: %w", path, err)
 	}
@@ -407,13 +462,24 @@ func (c *Client) postJSON(path string, payload map[string]interface{}) error {
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("status %d: %s", resp.StatusCode, respBody)
+		return &HTTPStatusError{
+			Operation:  "post " + path,
+			StatusCode: resp.StatusCode,
+			Body:       string(respBody),
+		}
 	}
 	c.apiSuccess.Add(1)
 	return nil
 }
 
 func (c *Client) doRequest(method, path string, body []byte, ifNoneMatch string) (*http.Response, error) {
+	return c.doRequestContext(context.Background(), method, path, body, ifNoneMatch)
+}
+
+func (c *Client) doRequestContext(ctx context.Context, method, path string, body []byte, ifNoneMatch string) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	fullURL := c.baseURL + path
 
 	var bodyReader io.Reader
@@ -428,7 +494,7 @@ func (c *Client) doRequest(method, path string, body []byte, ifNoneMatch string)
 		bodyReader = bytes.NewReader(merged)
 	}
 
-	req, err := http.NewRequest(method, fullURL, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
 	if err != nil {
 		return nil, err
 	}

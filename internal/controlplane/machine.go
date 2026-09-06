@@ -133,6 +133,14 @@ func (p *MachinePanelControlPlane) Report(payload ReportPayload) error {
 	)
 }
 
+func (p *MachinePanelControlPlane) ReportContext(ctx context.Context, payload ReportPayload) error {
+	return p.client.ReportContext(
+		ctx, payload.Traffic, payload.Alive, payload.Online,
+		payload.CPU, payload.Mem, payload.Swap, payload.Disk,
+		payload.Metrics,
+	)
+}
+
 func (p *MachinePanelControlPlane) ReportDevices(push PushClient, devices map[int][]string) {
 	if push != nil {
 		push.SendDeviceReport(devices)

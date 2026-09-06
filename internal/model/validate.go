@@ -21,6 +21,9 @@ func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 	if err != nil {
 		return fmt.Errorf("normalize kernel type: %w", err)
 	}
+	if err := ValidateXrayConfig(n, kernelType); err != nil {
+		return err
+	}
 
 	additionalOutboundSources, err := collectAdditionalOutboundTagSources(kcfg.CustomConfig, kcfg.CustomOutbound)
 	if err != nil {

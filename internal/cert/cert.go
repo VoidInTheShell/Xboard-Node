@@ -140,6 +140,13 @@ func (m *Manager) Reconfigure(ctx context.Context, newCfg config.CertConfig) (bo
 	if newCfg.CertDir == "" {
 		newCfg.CertDir = m.cfg.CertDir
 	}
+	if err := validateReconfigureInput(newCfg); err != nil {
+		return false, fmt.Errorf("cert reconfigure: %w", err)
+	}
+
+	oldCfg := m.cfg
+	oldMat := m.mat.Load()
+	oldACME := m.acmeStarted
 
 	// If ACME is running and the new config materially differs (or switches
 	// away from ACME), tear down the old certmagic instance first.
@@ -155,11 +162,67 @@ func (m *Manager) Reconfigure(ctx context.Context, newCfg config.CertConfig) (bo
 	m.cfg = newCfg
 
 	if err := m.Start(ctx); err != nil {
+		// A rejected panel update must not replace the last usable manual
+		// material. If an old ACME worker had to be stopped, start it again from
+		// the previous configuration before returning the candidate failure.
+		m.tearDownACME()
+		m.cfg = oldCfg
+		m.mat.Store(oldMat)
+		if oldACME {
+			if restoreErr := m.Start(ctx); restoreErr != nil {
+				return false, fmt.Errorf("cert reconfigure: %w; restore previous certificate manager: %v", err, restoreErr)
+			}
+		}
 		return false, fmt.Errorf("cert reconfigure: %w", err)
 	}
 
 	newTLS := m.TLSCert()
 	return !pemEqual(oldTLS, newTLS), nil
+}
+
+// validateReconfigureInput performs the deterministic checks before an active
+// certificate manager is stopped or its configuration is replaced.
+func validateReconfigureInput(cfg config.CertConfig) error {
+	mode := resolveModeFor(cfg)
+	switch mode {
+	case "none", "", "self":
+		return nil
+	case "file":
+		certPEM, err := os.ReadFile(cfg.CertFile)
+		if err != nil {
+			return fmt.Errorf("cert file: %w", err)
+		}
+		keyPEM, err := os.ReadFile(cfg.KeyFile)
+		if err != nil {
+			return fmt.Errorf("key file: %w", err)
+		}
+		if err := validateKeyPair(certPEM, keyPEM); err != nil {
+			return fmt.Errorf("invalid certificate pair: %w", err)
+		}
+		return nil
+	case "content":
+		if cfg.CertContent == "" || cfg.KeyContent == "" {
+			return fmt.Errorf("cert_mode 'content' requires both cert_content and key_content")
+		}
+		if err := validateKeyPair([]byte(cfg.CertContent), []byte(cfg.KeyContent)); err != nil {
+			return fmt.Errorf("invalid certificate content: %w", err)
+		}
+		return nil
+	case "http":
+		if strings.TrimSpace(cfg.Domain) == "" {
+			return fmt.Errorf("cert.domain is required for ACME modes (http/dns)")
+		}
+		return nil
+	case "dns":
+		if strings.TrimSpace(cfg.Domain) == "" {
+			return fmt.Errorf("cert.domain is required for ACME modes (http/dns)")
+		}
+		candidate := NewManager(cfg)
+		_, err := candidate.buildDNSSolver()
+		return err
+	default:
+		return fmt.Errorf("unknown cert_mode: %q", mode)
+	}
 }
 
 // tearDownACME cancels the running certmagic background goroutines and clears

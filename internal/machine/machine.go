@@ -5,6 +5,7 @@ package machine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -36,6 +37,11 @@ type Orchestrator struct {
 	cfg    *config.Config
 	client *panel.Client // machine-level client (no node_id)
 
+	// reconcileMu serializes discovery transitions with shutdown.  A WS
+	// sync.nodes callback is deliberately asynchronous, so without this guard
+	// a disable response could race a recovery/start and leave a node running.
+	reconcileMu sync.Mutex
+
 	mu    sync.Mutex
 	nodes map[int]*nodeHandle // node_id → handle
 
@@ -45,9 +51,14 @@ type Orchestrator struct {
 	mailboxes map[int]*controlplane.NodeMailbox
 	statuses  map[int]chan<- controlplane.StatusChange
 
-	// Shared WS client (nil when WS is disabled).
+	// Shared WS client (nil when WS is disabled). wsMu protects replacement
+	// during a machine disable/recovery transition. wsDone lets shutdown wait
+	// until the old reconnect loop has observed cancellation before recovery
+	// creates another client.
+	wsMu     sync.Mutex
 	ws       *panel.WSClient
 	wsCancel context.CancelFunc
+	wsDone   chan struct{}
 
 	// runCtx is stored from Run() so that onWSEvent can trigger rediscover
 	// for sync.nodes events without blocking the main loop.
@@ -55,6 +66,11 @@ type Orchestrator struct {
 
 	pullInterval time.Duration
 	pushInterval time.Duration
+	// recoveryInterval is used only while the machine API reports 401/403.
+	// This keeps disable→enable recovery prompt even when the panel's normal
+	// pull interval is 60 seconds and the WS has already been torn down.
+	recoveryInterval   time.Duration
+	machineUnavailable bool
 }
 
 // New creates a machine orchestrator from the given config.
@@ -65,11 +81,12 @@ func New(cfg *config.Config) *Orchestrator {
 		MachineID: cfg.Machine.MachineID,
 	}
 	return &Orchestrator{
-		cfg:       cfg,
-		client:    panel.NewClient(panelCfg),
-		nodes:     make(map[int]*nodeHandle),
-		mailboxes: make(map[int]*controlplane.NodeMailbox),
-		statuses:  make(map[int]chan<- controlplane.StatusChange),
+		cfg:              cfg,
+		client:           panel.NewClient(panelCfg),
+		nodes:            make(map[int]*nodeHandle),
+		mailboxes:        make(map[int]*controlplane.NodeMailbox),
+		statuses:         make(map[int]chan<- controlplane.StatusChange),
+		recoveryInterval: machineRecoveryInterval(cfg),
 	}
 }
 
@@ -78,26 +95,37 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.runCtx = ctx
 	nodesResp, err := o.client.GetMachineNodes()
 	if err != nil {
-		return fmt.Errorf("initial node discovery: %w", err)
-	}
+		if !isMachineAccessFailure(err) {
+			return fmt.Errorf("initial node discovery: %w", err)
+		}
+		// A disabled machine is an expected, recoverable state. Keep the
+		// process alive so a later panel re-enable can be discovered by REST.
+		o.applyIntervals(panel.MachineBaseConfig{})
+		o.setMachineUnavailable(true)
+		nlog.Core().Warn("machine is not currently active; waiting for panel recovery", "error", err)
+		o.reconcileMu.Lock()
+		o.stopAllLocked()
+		o.reconcileMu.Unlock()
+	} else {
+		o.setMachineUnavailable(false)
+		o.applyIntervals(nodesResp.BaseConfig)
+		nlog.Core().Info(fmt.Sprintf("machine %d: discovered %d nodes",
+			o.cfg.Machine.MachineID, len(nodesResp.Nodes)))
 
-	o.applyIntervals(nodesResp.BaseConfig)
-	nlog.Core().Info(fmt.Sprintf("machine %d: discovered %d nodes",
-		o.cfg.Machine.MachineID, len(nodesResp.Nodes)))
-
-	// Start machine-level WS as early as possible so sync.nodes can reach an
-	// empty machine before the first node is attached.
-	o.tryStartWS(ctx)
-
-	// Start initial nodes.
-	for _, n := range nodesResp.Nodes {
-		o.startNode(ctx, n)
+		// Serialize the initial attachment with a possible early sync.nodes
+		// callback from the newly-created WS.
+		o.reconcileMu.Lock()
+		o.tryStartWS(ctx)
+		o.reconcileNodesLocked(ctx, nodesResp.Nodes)
+		o.reconcileMu.Unlock()
 	}
 
 	discoveryTicker := time.NewTicker(o.pullInterval)
 	statusTicker := time.NewTicker(o.pushInterval)
+	recoveryTicker := time.NewTicker(o.recoveryInterval)
 	defer discoveryTicker.Stop()
 	defer statusTicker.Stop()
+	defer recoveryTicker.Stop()
 
 	for {
 		select {
@@ -106,7 +134,14 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			return nil
 
 		case <-discoveryTicker.C:
-			o.rediscover(ctx)
+			if !o.machineAccessUnavailable() {
+				o.rediscover(ctx)
+			}
+
+		case <-recoveryTicker.C:
+			if o.machineAccessUnavailable() {
+				o.rediscover(ctx)
+			}
 
 		case <-statusTicker.C:
 			o.reportMachineStatus()
@@ -156,10 +191,10 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 	perNodeClient.ResetConfigETag()
 
 	var push controlplane.PushClient
-	if o.ws != nil {
+	if ws := o.currentWS(); ws != nil {
 		push = &machineNodePush{
 			nodeID: mn.ID,
-			ws:     o.ws,
+			ws:     ws,
 		}
 	}
 
@@ -179,7 +214,11 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 
 	go func() {
 		defer close(done)
-		defer o.unregisterNode(mn.ID)
+		defer cancel()
+		// The service can fail before the orchestrator's normal stop path. Remove
+		// only this exact handle so a late exit from an old goroutine cannot
+		// delete a replacement handle that rediscovery has already installed.
+		defer o.unregisterNode(mn.ID, handle)
 		if err := svc.Run(nodeCtx); err != nil {
 			nlog.Core().Error("machine node exited with error",
 				"node_id", mn.ID, "error", err)
@@ -207,12 +246,31 @@ func (o *Orchestrator) stopNode(nodeID int) {
 }
 
 func (o *Orchestrator) stopAll() {
+	o.reconcileMu.Lock()
+	defer o.reconcileMu.Unlock()
+	o.stopAllLocked()
+}
+
+// stopAllLocked stops every node and the shared WS client. The caller must
+// hold reconcileMu; the method intentionally clears ownership maps before
+// waiting so no late event can be routed to a service that is being stopped.
+func (o *Orchestrator) stopAllLocked() {
 	o.mu.Lock()
 	handles := make(map[int]*nodeHandle, len(o.nodes))
 	for id, h := range o.nodes {
 		handles[id] = h
 	}
+	for id := range handles {
+		delete(o.nodes, id)
+	}
 	o.mu.Unlock()
+
+	o.eventsMu.Lock()
+	for id := range handles {
+		delete(o.mailboxes, id)
+		delete(o.statuses, id)
+	}
+	o.eventsMu.Unlock()
 
 	for id, h := range handles {
 		nlog.Core().Info(fmt.Sprintf("machine: stopping node %d", id))
@@ -222,22 +280,64 @@ func (o *Orchestrator) stopAll() {
 		<-h.done
 	}
 
-	if o.wsCancel != nil {
-		o.wsCancel()
+	// A service may have registered its status channel between the first map
+	// cleanup and cancellation. Remove those late registrations as well.
+	o.eventsMu.Lock()
+	for id := range handles {
+		delete(o.mailboxes, id)
+		delete(o.statuses, id)
 	}
+	o.eventsMu.Unlock()
+
+	o.stopWS()
 }
 
 // ─── Node discovery ──────────────────────────────────────────────────────
 
 func (o *Orchestrator) rediscover(ctx context.Context) {
+	if ctx == nil || ctx.Err() != nil {
+		return
+	}
+	o.reconcileMu.Lock()
+	defer o.reconcileMu.Unlock()
+
 	nodesResp, err := o.client.GetMachineNodes()
 	if err != nil {
+		if isMachineAccessFailure(err) {
+			// 401/403 is the panel's authoritative signal that this machine
+			// is disabled or its binding/token is no longer accepted. Stop
+			// existing services immediately, but keep Run's ticker alive for
+			// automatic recovery after the machine is enabled again.
+			nlog.Core().Warn("machine is inactive or unauthorized; stopping services until panel recovery", "error", err)
+			o.setMachineUnavailable(true)
+			o.stopAllLocked()
+			return
+		}
 		nlog.Core().Warn("machine node discovery failed", "error", err)
 		return
 	}
+	if nodesResp == nil {
+		nlog.Core().Warn("machine node discovery returned an empty response")
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
 
-	wanted := make(map[int]panel.MachineNode, len(nodesResp.Nodes))
-	for _, n := range nodesResp.Nodes {
+	o.setMachineUnavailable(false)
+	o.applyIntervals(nodesResp.BaseConfig)
+	// A prior 401/403 transition tears down the WS. Recreate it after the
+	// first successful discovery; REST polling remains the source of truth.
+	o.tryStartWS(ctx)
+	o.reconcileNodesLocked(ctx, nodesResp.Nodes)
+}
+
+// reconcileNodesLocked makes the local set match the panel snapshot. The
+// caller must hold reconcileMu so it cannot overlap stopAll or another
+// rediscovery.
+func (o *Orchestrator) reconcileNodesLocked(ctx context.Context, nodes []panel.MachineNode) {
+	wanted := make(map[int]panel.MachineNode, len(nodes))
+	for _, n := range nodes {
 		wanted[n.ID] = n
 	}
 
@@ -254,7 +354,7 @@ func (o *Orchestrator) rediscover(ctx context.Context) {
 		o.stopNode(id)
 	}
 
-	for _, n := range nodesResp.Nodes {
+	for _, n := range nodes {
 		o.startNode(ctx, n) // no-op if already running
 	}
 }
@@ -277,6 +377,16 @@ func (o *Orchestrator) reportMachineStatus() {
 // ─── WS mux ─────────────────────────────────────────────────────────────
 
 func (o *Orchestrator) tryStartWS(ctx context.Context) {
+	if ctx == nil || ctx.Err() != nil {
+		return
+	}
+	o.wsMu.Lock()
+	if o.ws != nil {
+		o.wsMu.Unlock()
+		return
+	}
+	o.wsMu.Unlock()
+
 	hs, err := o.client.Handshake()
 	if err != nil {
 		nlog.Core().Warn("machine ws handshake failed, REST only", "error", err)
@@ -295,7 +405,7 @@ func (o *Orchestrator) tryStartWS(ctx context.Context) {
 		MachineID:        o.cfg.Machine.MachineID,
 	}
 
-	o.ws = panel.NewWSClient(
+	ws := panel.NewWSClient(
 		hs.WebSocket.WSURL,
 		o.cfg.Machine.Token,
 		0, // no single node_id
@@ -306,10 +416,78 @@ func (o *Orchestrator) tryStartWS(ctx context.Context) {
 	)
 
 	wsCtx, wsCancel := context.WithCancel(ctx)
+	wsDone := make(chan struct{})
+	o.wsMu.Lock()
+	// A future caller may have completed a concurrent handshake while this
+	// request was in flight. Keep only one reconnect loop per orchestrator.
+	if o.ws != nil {
+		o.wsMu.Unlock()
+		wsCancel()
+		return
+	}
+	o.ws = ws
 	o.wsCancel = wsCancel
-	go o.ws.Run(wsCtx)
+	o.wsDone = wsDone
+	o.wsMu.Unlock()
+	go func() {
+		defer close(wsDone)
+		ws.Run(wsCtx)
+	}()
 
 	nlog.Core().Info("machine: ws mux started")
+}
+
+func (o *Orchestrator) currentWS() *panel.WSClient {
+	o.wsMu.Lock()
+	defer o.wsMu.Unlock()
+	return o.ws
+}
+
+// stopWS cancels and forgets the shared WS client. It waits for the reconnect
+// loop so a subsequent recovery cannot leave an old client reconnecting in the
+// background or route events into newly-started services.
+func (o *Orchestrator) stopWS() {
+	o.wsMu.Lock()
+	cancel := o.wsCancel
+	done := o.wsDone
+	o.ws = nil
+	o.wsCancel = nil
+	o.wsDone = nil
+	o.wsMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
+}
+
+func isMachineAccessFailure(err error) bool {
+	var statusErr *panel.HTTPStatusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	return statusErr.StatusCode == 401 || statusErr.StatusCode == 403
+}
+
+func machineRecoveryInterval(cfg *config.Config) time.Duration {
+	if cfg == nil || cfg.WS.DiscoveryInterval <= 0 {
+		return 300 * time.Second
+	}
+	return time.Duration(cfg.WS.DiscoveryInterval) * time.Second
+}
+
+func (o *Orchestrator) setMachineUnavailable(unavailable bool) {
+	o.mu.Lock()
+	o.machineUnavailable = unavailable
+	o.mu.Unlock()
+}
+
+func (o *Orchestrator) machineAccessUnavailable() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.machineUnavailable
 }
 
 // onWSEvent routes a WS event to the correct node's channel.
@@ -318,7 +496,9 @@ func (o *Orchestrator) onWSEvent(event panel.WSEvent) {
 	// sync.nodes is a machine-level event, not per-node
 	if event.Type == panel.WSEventSyncNodes {
 		nlog.Core().Info("machine received sync.nodes, triggering immediate rediscovery")
-		go o.rediscover(o.runCtx)
+		if ctx := o.runCtx; ctx != nil && ctx.Err() == nil {
+			go o.rediscover(ctx)
+		}
 		return
 	}
 
@@ -343,6 +523,12 @@ func (o *Orchestrator) onWSEvent(event panel.WSEvent) {
 	o.mu.Unlock()
 	if !known {
 		nlog.Core().Debug("machine ws event for unknown node", "node_id", nodeID, "type", event.Type)
+		// An instance that failed initial startup has no handle. A corrected
+		// config notification should retry discovery immediately, not wait for
+		// the normal machine inventory interval.
+		if event.Type == panel.WSEventSyncConfig && o.runCtx != nil && o.runCtx.Err() == nil {
+			go o.rediscover(o.runCtx)
+		}
 		return
 	}
 	if !ready {
@@ -390,7 +576,20 @@ func (o *Orchestrator) registerNode(nodeID int, st chan<- controlplane.StatusCha
 	o.eventsMu.Unlock()
 }
 
-func (o *Orchestrator) unregisterNode(nodeID int) {
+func (o *Orchestrator) unregisterNode(nodeID int, expected *nodeHandle) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	current, ok := o.nodes[nodeID]
+	removeEvents := !ok || expected == nil || current == expected
+	if removeEvents && ok {
+		delete(o.nodes, nodeID)
+	}
+	if !removeEvents {
+		return
+	}
+
+	// Keep handle identity and event cleanup atomic with respect to startNode.
+	// Otherwise a new handle could be installed between the two map removals.
 	o.eventsMu.Lock()
 	delete(o.mailboxes, nodeID)
 	delete(o.statuses, nodeID)

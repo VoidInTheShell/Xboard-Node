@@ -145,6 +145,7 @@ func cloneNodeSpec(spec *model.NodeSpec) *model.NodeSpec {
 		return nil
 	}
 	clone := *spec
+	clone.XrayConfig = model.CloneJSONMap(spec.XrayConfig)
 	if spec.NetworkSettings != nil {
 		clone.NetworkSettings = make(map[string]interface{}, len(spec.NetworkSettings))
 		for k, v := range spec.NetworkSettings {

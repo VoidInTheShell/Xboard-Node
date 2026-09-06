@@ -15,6 +15,9 @@ type NodeSpec struct {
 	CustomOutbounds  []OutboundConfig
 	CustomRoutes     []map[string]any
 	CustomRouteRules []CustomRouteRule
+	XrayConfig       map[string]any
+	ConfigRevision   int64
+	ConfigHash       string
 	CertConfig       *config.CertConfig
 	AutoTLS          bool
 	Domain           string
