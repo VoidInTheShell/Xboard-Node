@@ -231,16 +231,7 @@ jobs:
       startsWith(github.ref, 'refs/heads/') &&
       (
         github.event_name == 'workflow_dispatch' ||
-        (
-          github.event_name == 'push' &&
-          (
-            github.ref == 'refs/heads/main' ||
-            github.ref == 'refs/heads/master' ||
-            github.ref == 'refs/heads/dev' ||
-            github.ref == 'refs/heads/new-dev' ||
-            startsWith(github.ref, 'refs/heads/staging/')
-          )
-        )
+        (github.event_name == 'push' && github.ref == 'refs/heads/dev')
       )
     needs: build-and-push
     runs-on: ubuntu-latest

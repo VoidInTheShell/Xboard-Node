@@ -1,6 +1,6 @@
 # Xboard-Node staging deployment
 
-Every pushed branch tests and builds `ghcr.io/voidintheshell/xboard-node`. Pushes to `main`, `master`, `dev`, and `new-dev`, plus opt-in `staging/**` branches, deploy automatically; other branches deploy only when `workflow_dispatch` is run on that branch. A deployment always uses the immutable image digest and never compiles on US2.
+Every pushed branch tests and builds `ghcr.io/voidintheshell/xboard-node`. Pushes to the historical mainline `dev` deploy automatically; other branches deploy only when `workflow_dispatch` is run on that branch. A deployment always uses the immutable image digest and never compiles on US2. After feature-branch acceptance, dispatch `dev` again to restore the shared development baseline.
 
 ## Runtime layout
 
