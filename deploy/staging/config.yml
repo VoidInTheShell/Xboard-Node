@@ -1,7 +1,7 @@
 health_port: 65530
 
 kernel:
-  type: singbox
+  type: xray
   log_level: warn
 
 log:
