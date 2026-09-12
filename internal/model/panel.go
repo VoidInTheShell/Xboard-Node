@@ -94,6 +94,14 @@ func NodeSpecFromPanel(nc *panel.NodeConfig) *NodeSpec {
 			},
 		})
 	}
+	ruleFiles := make([]RuleFileSpec, 0, len(nc.RuleFiles))
+	for _, file := range nc.RuleFiles {
+		ruleFiles = append(ruleFiles, RuleFileSpec{
+			ID: file.ID, Name: file.Name, Source: file.Source, URL: file.URL,
+			AutoUpdate: file.AutoUpdate, UpdateIntervalHours: file.UpdateIntervalHours,
+			DownloadRevision: file.DownloadRevision,
+		})
+	}
 
 	return &NodeSpec{
 		Protocol:            nc.Protocol,
@@ -110,6 +118,7 @@ func NodeSpecFromPanel(nc *panel.NodeConfig) *NodeSpec {
 		XrayConfig:          CloneJSONMap(nc.XrayConfig),
 		ConfigRevision:      nc.ConfigRevision,
 		ConfigHash:          nc.ConfigHash,
+		RuleFiles:           ruleFiles,
 		CertConfig:          certCfg,
 		AutoTLS:             nc.AutoTLS,
 		Domain:              nc.Domain,
@@ -246,6 +255,14 @@ func (n *NodeSpec) ToPanel() *panel.NodeConfig {
 			},
 		})
 	}
+	ruleFiles := make([]panel.RuleFileConfig, 0, len(n.RuleFiles))
+	for _, file := range n.RuleFiles {
+		ruleFiles = append(ruleFiles, panel.RuleFileConfig{
+			ID: file.ID, Name: file.Name, Source: file.Source, URL: file.URL,
+			AutoUpdate: file.AutoUpdate, UpdateIntervalHours: file.UpdateIntervalHours,
+			DownloadRevision: file.DownloadRevision,
+		})
+	}
 
 	return &panel.NodeConfig{
 		Protocol:            n.Protocol,
@@ -262,6 +279,7 @@ func (n *NodeSpec) ToPanel() *panel.NodeConfig {
 		XrayConfig:          CloneJSONMap(n.XrayConfig),
 		ConfigRevision:      n.ConfigRevision,
 		ConfigHash:          n.ConfigHash,
+		RuleFiles:           ruleFiles,
 		CertConfig:          certCfg,
 		AutoTLS:             n.AutoTLS,
 		Domain:              n.Domain,

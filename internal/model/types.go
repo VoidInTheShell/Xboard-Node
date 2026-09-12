@@ -18,6 +18,7 @@ type NodeSpec struct {
 	XrayConfig       map[string]any
 	ConfigRevision   int64
 	ConfigHash       string
+	RuleFiles        []RuleFileSpec
 	CertConfig       *config.CertConfig
 	AutoTLS          bool
 	Domain           string
@@ -49,6 +50,16 @@ type NodeSpec struct {
 
 	Multiplex           *MultiplexConfig
 	AcceptProxyProtocol bool
+}
+
+type RuleFileSpec struct {
+	ID                  int64
+	Name                string
+	Source              string
+	URL                 string
+	AutoUpdate          bool
+	UpdateIntervalHours int
+	DownloadRevision    int64
 }
 
 type Hysteria2Masquerade struct {

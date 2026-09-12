@@ -102,6 +102,7 @@ type NodeConfig struct {
 	XrayConfig       map[string]any    `json:"xray_config,omitempty"`
 	ConfigRevision   int64             `json:"config_revision,omitempty"`
 	ConfigHash       string            `json:"config_hash,omitempty"`
+	RuleFiles        []RuleFileConfig  `json:"rule_files,omitempty"`
 
 	// Certificate settings (Xboard extension)
 	CertConfig *CertConfig `json:"cert_config,omitempty"`
@@ -147,6 +148,17 @@ type NodeConfig struct {
 
 	// Proxy Protocol (supports both top-level and networkSettings for compatibility)
 	AcceptProxyProtocol bool `json:"accept_proxy_protocol,omitempty"`
+}
+
+// RuleFileConfig describes one panel-managed file in the kernel GeoData dir.
+type RuleFileConfig struct {
+	ID                  int64  `json:"id"`
+	Name                string `json:"name"`
+	Source              string `json:"source,omitempty"`
+	URL                 string `json:"url,omitempty"`
+	AutoUpdate          bool   `json:"auto_update"`
+	UpdateIntervalHours int    `json:"update_interval_hours"`
+	DownloadRevision    int64  `json:"download_revision"`
 }
 
 // GetProxyProtocol returns true if AcceptProxyProtocol is set either at node level

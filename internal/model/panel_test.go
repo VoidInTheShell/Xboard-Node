@@ -116,3 +116,23 @@ func TestHysteria2MasqueradeRejectsUnsafeURL(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestRuleFilesPanelRoundTrip(t *testing.T) {
+	input := &panel.NodeConfig{
+		Protocol:   "vless",
+		ServerPort: 443,
+		RuleFiles: []panel.RuleFileConfig{{
+			ID: 9, Name: "geosite.dat", Source: "node-default",
+			URL: "https://1.1.1.1/geosite.dat", AutoUpdate: true,
+			UpdateIntervalHours: 24, DownloadRevision: 3,
+		}},
+	}
+	node := NodeSpecFromPanel(input)
+	if len(node.RuleFiles) != 1 || node.RuleFiles[0].DownloadRevision != 3 {
+		t.Fatalf("unexpected rule files: %#v", node.RuleFiles)
+	}
+	output := node.ToPanel()
+	if len(output.RuleFiles) != 1 || output.RuleFiles[0] != input.RuleFiles[0] {
+		t.Fatalf("rule file round trip: got %#v, want %#v", output.RuleFiles, input.RuleFiles)
+	}
+}

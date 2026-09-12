@@ -683,6 +683,14 @@ func hexEncode(dst, src []byte) {
 
 // ensureGeoData downloads geo databases when routes reference geoip/geosite.
 func (x *Xray) ensureGeoData(nc *model.NodeSpec) {
+	if len(nc.RuleFiles) > 0 {
+		dir := x.cfg.GeoDataDir
+		if err := geodata.Sync(dir, nc.RuleFiles); err != nil {
+			nlog.Core().Warn("managed rule files are not fully available", "error", err)
+		}
+		os.Setenv("XRAY_LOCATION_ASSET", dir)
+		return
+	}
 	needIP, needSite := kernel.NeedsGeoIP(nc.Routes), kernel.NeedsGeoSite(nc.Routes)
 	if !needIP && !needSite {
 		return
@@ -748,6 +756,7 @@ func cloneNodeSpecForRuntime(src *model.NodeSpec) *model.NodeSpec {
 	dst.CustomOutbounds = cloneRuntimeOutbounds(src.CustomOutbounds)
 	dst.CustomRouteRules = append([]model.CustomRouteRule(nil), src.CustomRouteRules...)
 	dst.Routes = append([]model.RouteRule(nil), src.Routes...)
+	dst.RuleFiles = append([]model.RuleFileSpec(nil), src.RuleFiles...)
 	return &dst
 }
 

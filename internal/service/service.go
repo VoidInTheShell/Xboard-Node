@@ -20,6 +20,7 @@ import (
 	"github.com/cedar2025/xboard-node/internal/config"
 	"github.com/cedar2025/xboard-node/internal/controlplane"
 	"github.com/cedar2025/xboard-node/internal/kernel"
+	"github.com/cedar2025/xboard-node/internal/kernel/geodata"
 	"github.com/cedar2025/xboard-node/internal/kernel/singbox"
 	"github.com/cedar2025/xboard-node/internal/kernel/xray"
 	"github.com/cedar2025/xboard-node/internal/limiter"
@@ -1464,6 +1465,10 @@ func (s *Service) buildMetrics(status monitor.Status) map[string]interface{} {
 	lastUsers := s.lastUsers
 	wsClient := s.wsClient
 	configApply := s.configApply
+	var ruleFiles []model.RuleFileSpec
+	if s.desiredConfig != nil {
+		ruleFiles = append([]model.RuleFileSpec(nil), s.desiredConfig.RuleFiles...)
+	}
 	s.metricsMu.RUnlock()
 
 	m := make(map[string]interface{})
@@ -1543,6 +1548,10 @@ func (s *Service) buildMetrics(status monitor.Status) map[string]interface{} {
 		"error_path":       configApply.ErrorPath,
 		"error_reason":     configApply.ErrorReason,
 		"error_message":    configApply.ErrorMessage,
+	}
+	if len(ruleFiles) > 0 {
+		geodata.SyncAsync(s.cfg.Kernel.GeoDataDir, ruleFiles)
+		m["rule_files"] = geodata.Status(s.cfg.Kernel.GeoDataDir, ruleFiles)
 	}
 
 	return m
