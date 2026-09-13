@@ -31,6 +31,7 @@ import (
 )
 
 type Service struct {
+	usage        usageState
 	cfg          *config.Config
 	source       controlplane.Source
 	sink         controlplane.Sink
@@ -1361,6 +1362,7 @@ func (s *Service) trackAndEnforce(ctx context.Context) {
 	}
 
 	s.tracker.Process(traffic, aliveIPs, connCount)
+	s.reportUsage(ctx, traffic, aliveIPs)
 
 	// Only log stats if there's actual traffic or connections
 	if connCount > 0 || len(traffic) > 0 {

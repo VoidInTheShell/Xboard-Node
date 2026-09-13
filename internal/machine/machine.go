@@ -34,8 +34,10 @@ type nodeHandle struct {
 //   - maintains a shared WS connection that demuxes events by node_id
 //   - reports machine-level load via POST /machine/status
 type Orchestrator struct {
-	cfg    *config.Config
-	client *panel.Client // machine-level client (no node_id)
+	usageEpoch    string
+	usageSequence uint64
+	cfg           *config.Config
+	client        *panel.Client // machine-level client (no node_id)
 
 	// reconcileMu serializes discovery transitions with shutdown.  A WS
 	// sync.nodes callback is deliberately asynchronous, so without this guard
@@ -362,6 +364,7 @@ func (o *Orchestrator) reconcileNodesLocked(ctx context.Context, nodes []panel.M
 // ─── Machine status reporting ────────────────────────────────────────────
 
 func (o *Orchestrator) reportMachineStatus() {
+	o.reportUsage()
 	s := monitor.Collect()
 	if err := o.client.ReportMachineStatus(
 		s.CPU,

@@ -18,6 +18,7 @@ import (
 	"github.com/xtls/xray-core/transport"
 
 	"github.com/cedar2025/xboard-node/internal/nlog"
+	"github.com/cedar2025/xboard-node/internal/observation"
 )
 
 // Access xray's internal config creator registry so we can replace the
@@ -49,9 +50,10 @@ func limitDispatcherFactory(ctx context.Context, config interface{}) (interface{
 		return orig, nil
 	}
 	ld := &LimitDispatcher{
-		inner:      orig,
-		innerDisp:  inner,
-		limitedIPs: make(map[string]map[string]int),
+		observations: observation.New(true),
+		inner:        orig,
+		innerDisp:    inner,
+		limitedIPs:   make(map[string]map[string]int),
 	}
 	globalLimitDispatcher.Store(ld)
 	nlog.Core().Debug("xray: limit dispatcher installed")
@@ -61,13 +63,14 @@ func limitDispatcherFactory(ctx context.Context, config interface{}) (interface{
 // LimitDispatcher wraps xray's DefaultDispatcher to enforce per-user
 // admission checks before a request is dispatched into xray-core.
 //
-// It intentionally does NOT mutate transport.Link.Reader/Writer. Xray's
+// It intentionally does NOT replace the inbound transport.Link.Reader. Xray's
 // mux/XUDP close path requires the original concrete *pipe.Reader to remain
 // intact, so the dispatcher is limited to gate-keeping and safe connection
 // lifecycle bookkeeping.
 type LimitDispatcher struct {
-	inner     interface{}        // original DefaultDispatcher (Feature + Dispatcher)
-	innerDisp routing.Dispatcher // same object, typed as Dispatcher
+	observations *observation.Registry
+	inner        interface{}        // original DefaultDispatcher (Feature + Dispatcher)
+	innerDisp    routing.Dispatcher // same object, typed as Dispatcher
 
 	// limitedUsers: users with device limit > 0, protected by mu.
 	// Needs deterministic IP ordering for kick decisions.
@@ -108,16 +111,21 @@ func (d *LimitDispatcher) Dispatch(ctx context.Context, dest net.Destination) (*
 		return nil, err
 	}
 
+	var observed *sourceSession
+	if email != "" {
+		observed = d.openSource(email, sourceIP, isTCP)
+		ctx = context.WithValue(ctx, sourceContextKey{}, observed)
+	}
 	link, err := d.innerDisp.Dispatch(ctx, dest)
 	if err != nil {
-		if email != "" && isTCP {
-			d.delConn(email, sourceIP)
+		if observed != nil {
+			observed.close()
 		}
 		return nil, err
 	}
 
-	if email != "" {
-		d.trackLink(link, email, sourceIP, isTCP)
+	if observed != nil {
+		link.Writer = &closeTrackingWriter{Writer: link.Writer, onClose: observed.close, count: observed.counter.Upload}
 	}
 	return link, nil
 }
@@ -129,7 +137,10 @@ func (d *LimitDispatcher) DispatchLink(ctx context.Context, dest net.Destination
 	}
 
 	if email != "" {
-		d.trackLink(link, email, sourceIP, isTCP)
+		observed := d.openSource(email, sourceIP, isTCP)
+		observed.dispatchLink = true
+		ctx = context.WithValue(ctx, sourceContextKey{}, observed)
+		defer observed.close()
 	}
 	return d.innerDisp.DispatchLink(ctx, dest, link)
 }
@@ -157,19 +168,26 @@ func (d *LimitDispatcher) identifyAndCheck(ctx context.Context, dest net.Destina
 // transport primitives. This keeps mux/XUDP compatible while still allowing
 // the dispatcher to release device-limit state when the link closes.
 func (d *LimitDispatcher) trackLink(link *transport.Link, email, sourceIP string, isTCP bool) {
+	observed := d.openSource(email, sourceIP, isTCP)
+	link.Writer = &closeTrackingWriter{Writer: link.Writer, onClose: observed.close, count: observed.counter.Upload}
+}
+
+func (d *LimitDispatcher) openSource(email, sourceIP string, isTCP bool) *sourceSession {
+	d.mu.RLock()
+	uid := d.emailToUID[email]
+	d.mu.RUnlock()
+	observed := d.observations.Open(uid, sourceIP)
 	d.connCount.Add(1)
 
 	onClose := func() {
+		observed.Close()
 		if isTCP {
 			d.delConn(email, sourceIP)
 		}
 		d.connCount.Add(-1)
 	}
 
-	link.Writer = &closeTrackingWriter{
-		Writer:  link.Writer,
-		onClose: onClose,
-	}
+	return &sourceSession{counter: observed, release: onClose}
 }
 
 // ─── features.Feature (delegated) ───────────────────────────────────────────
@@ -218,9 +236,9 @@ func (d *LimitDispatcher) ResetConns() {
 // Traffic bytes are intentionally left to xray's built-in stats pipeline.
 func (d *LimitDispatcher) GetConnectionState() (aliveIPs map[int]map[string]bool, connCount int) {
 	d.mu.RLock()
+	defer d.mu.RUnlock()
 	emailToUID := d.emailToUID
 	limitedIPs := d.limitedIPs
-	d.mu.RUnlock()
 
 	aliveIPs = make(map[int]map[string]bool)
 
@@ -390,6 +408,16 @@ type closeTrackingWriter struct {
 	buf.Writer
 	onClose func()
 	closed  atomic.Bool
+	count   func(int64)
+}
+
+func (w *closeTrackingWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
+	n := int64(mb.Len())
+	err := w.Writer.WriteMultiBuffer(mb)
+	if err == nil && w.count != nil {
+		w.count(n)
+	}
+	return err
 }
 
 func (w *closeTrackingWriter) Close() error {

@@ -16,6 +16,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/cedar2025/xboard-node/internal/nlog"
+	"github.com/cedar2025/xboard-node/internal/observation"
 )
 
 // ipPool caches ipSnapshot maps to reduce allocations.
@@ -122,10 +123,11 @@ func (u *userStats) aliveIPList() map[string]bool {
 //   - Close callback to decrement IP refcounts
 //   - Per-connection rate limit token accumulation (amortized WaitN)
 type ConnTracker struct {
-	usersMu sync.RWMutex
-	users   map[int]*userStats  // userID → stats
-	uuidMap map[string]int      // UUID → userID (for lookup in RoutedConnection)
-	connMap map[string]net.Conn // connID → conn (only for force-close support)
+	observations *observation.Registry
+	usersMu      sync.RWMutex
+	users        map[int]*userStats  // userID → stats
+	uuidMap      map[string]int      // UUID → userID (for lookup in RoutedConnection)
+	connMap      map[string]net.Conn // connID → conn (only for force-close support)
 
 	idCounter atomic.Int64
 
@@ -144,6 +146,7 @@ type ConnTracker struct {
 // NewConnTracker creates a tracker.
 func NewConnTracker(_ int) *ConnTracker {
 	return &ConnTracker{
+		observations:  observation.New(true),
 		users:         make(map[int]*userStats),
 		uuidMap:       make(map[string]int),
 		connMap:       make(map[string]net.Conn),
@@ -247,14 +250,15 @@ func (t *ConnTracker) RoutedConnection(
 	}
 
 	return &trackedConn{
-		Conn:     conn,
-		tracker:  t,
-		us:       us,
-		userID:   uid,
-		connID:   connID,
-		sourceIP: sourceIP,
-		limiter:  lim,
-		ctx:      ctx,
+		observation: t.observations.Open(uid, sourceIP),
+		Conn:        conn,
+		tracker:     t,
+		us:          us,
+		userID:      uid,
+		connID:      connID,
+		sourceIP:    sourceIP,
+		limiter:     lim,
+		ctx:         ctx,
 	}
 }
 
@@ -299,14 +303,15 @@ func (t *ConnTracker) RoutedPacketConnection(
 	}
 
 	return &trackedPacketConn{
-		PacketConn: conn,
-		tracker:    t,
-		us:         us,
-		userID:     uid,
-		connID:     connID,
-		sourceIP:   sourceIP,
-		limiter:    lim,
-		ctx:        ctx,
+		observation: t.observations.Open(uid, sourceIP),
+		PacketConn:  conn,
+		tracker:     t,
+		us:          us,
+		userID:      uid,
+		connID:      connID,
+		sourceIP:    sourceIP,
+		limiter:     lim,
+		ctx:         ctx,
 	}
 }
 
@@ -558,6 +563,7 @@ func (r *RateLimitedReadCloser) Read(b []byte) (int, error) {
 }
 
 type trackedConn struct {
+	observation *observation.Counter
 	net.Conn
 	tracker  *ConnTracker
 	us       *userStats // per-user stats (upload/download atomics + IP tracking)
@@ -579,6 +585,7 @@ func (c *trackedConn) Read(b []byte) (int, error) {
 	if n > 0 {
 		if c.us != nil {
 			c.us.upload.Add(int64(n)) // 从入站读取 = 用户上传
+			c.observation.Upload(int64(n))
 		}
 		if c.limiter != nil {
 			// Non-blocking rate limiting
@@ -627,12 +634,14 @@ func (c *trackedConn) Write(b []byte) (int, error) {
 	n, err := c.Conn.Write(b)
 	if n > 0 && c.us != nil {
 		c.us.download.Add(int64(n)) // 向入站写入 = 用户下载
+		c.observation.Download(int64(n))
 	}
 	return n, err
 }
 
 func (c *trackedConn) Close() error {
 	if c.closed.CompareAndSwap(false, true) {
+		c.observation.Close()
 		if c.us != nil {
 			c.us.removeConn(c.sourceIP)
 		}
@@ -645,10 +654,22 @@ func (c *trackedConn) Close() error {
 // ReadCounter/WriteCounter unwrap interfaces.
 func (c *trackedConn) makeCountFunc(counter *atomic.Int64) N.CountFunc {
 	if c.limiter == nil {
-		return func(n int64) { counter.Add(n) }
+		return func(n int64) {
+			counter.Add(n)
+			if counter == &c.us.upload {
+				c.observation.Upload(n)
+			} else {
+				c.observation.Download(n)
+			}
+		}
 	}
 	return func(n int64) {
 		counter.Add(n)
+		if counter == &c.us.upload {
+			c.observation.Upload(n)
+		} else {
+			c.observation.Download(n)
+		}
 		// Non-blocking rate limiting with context cancellation
 		if !c.limiter.AllowN(time.Now(), int(n)) {
 			resv := c.limiter.ReserveN(time.Now(), int(n))
@@ -687,6 +708,7 @@ func (c *trackedConn) WriterReplaceable() bool { return true }
 // ─── trackedPacketConn (UDP / QUIC) ─────────────────────────────────────────
 
 type trackedPacketConn struct {
+	observation *observation.Counter
 	N.PacketConn
 	tracker  *ConnTracker
 	us       *userStats
@@ -704,6 +726,7 @@ func (c *trackedPacketConn) ReadPacket(buffer *buf.Buffer) (singM.Socksaddr, err
 		n := int64(buffer.Len())
 		if c.us != nil {
 			c.us.upload.Add(n) // 从入站读取 = 用户上传
+			c.observation.Upload(n)
 		}
 		if c.limiter != nil {
 			// Non-blocking rate limiting with context cancellation
@@ -750,12 +773,14 @@ func (c *trackedPacketConn) WritePacket(buffer *buf.Buffer, dest singM.Socksaddr
 	err := c.PacketConn.WritePacket(buffer, dest)
 	if err == nil && c.us != nil {
 		c.us.download.Add(n) // 向入站写入 = 用户下载
+		c.observation.Download(n)
 	}
 	return err
 }
 
 func (c *trackedPacketConn) Close() error {
 	if c.closed.CompareAndSwap(false, true) {
+		c.observation.Close()
 		if c.us != nil {
 			c.us.removeConn(c.sourceIP)
 		}
@@ -764,12 +789,20 @@ func (c *trackedPacketConn) Close() error {
 	return c.PacketConn.Close()
 }
 
-func (c *trackedPacketConn) makeCountFunc(counter *atomic.Int64) N.CountFunc {
+func (c *trackedPacketConn) makeCountFunc(counter *atomic.Int64, upload bool) N.CountFunc {
+	observe := func(n int64) {
+		if upload {
+			c.observation.Upload(n)
+		} else {
+			c.observation.Download(n)
+		}
+	}
 	if c.limiter == nil {
-		return func(n int64) { counter.Add(n) }
+		return func(n int64) { counter.Add(n); observe(n) }
 	}
 	return func(n int64) {
 		counter.Add(n)
+		observe(n)
 		// Non-blocking rate limiting with context cancellation
 		if !c.limiter.AllowN(time.Now(), int(n)) {
 			resv := c.limiter.ReserveN(time.Now(), int(n))
@@ -791,16 +824,19 @@ func (c *trackedPacketConn) UnwrapPacketReader() (N.PacketReader, []N.CountFunc)
 	if c.us == nil {
 		return c.PacketConn, nil
 	}
-	return c.PacketConn, []N.CountFunc{c.makeCountFunc(&c.us.download)}
+	return c.PacketConn, []N.CountFunc{c.makeCountFunc(&c.us.upload, true)}
 }
 
 func (c *trackedPacketConn) UnwrapPacketWriter() (N.PacketWriter, []N.CountFunc) {
 	if c.us == nil {
 		return c.PacketConn, nil
 	}
-	return c.PacketConn, []N.CountFunc{c.makeCountFunc(&c.us.upload)}
+	return c.PacketConn, []N.CountFunc{c.makeCountFunc(&c.us.download, false)}
 }
 
 func (c *trackedPacketConn) Upstream() any           { return c.PacketConn }
 func (c *trackedPacketConn) ReaderReplaceable() bool { return true }
-func (c *trackedPacketConn) WriterReplaceable() bool { return true }
+
+// sing unwraps replaceable packet writers before checking count interfaces.
+// Keep this wrapper until UnwrapPacketWriter supplies the accounting callbacks.
+func (c *trackedPacketConn) WriterReplaceable() bool { return false }

@@ -65,6 +65,30 @@ Legacy single-panel config is fully compatible. Appending bindings auto-migrates
 - Custom outbounds: [docs-custom-outbounds.md](docs-custom-outbounds.md)
 - DNS providers (ACME DNS-01): [docs-dns-providers.md](docs-dns-providers.md)
 
+## Usage observations
+
+Updated panels can accept an independent observation stream at
+`/api/v2/server/usage` and `/api/v2/server/machine/usage`. Existing billing reports
+are unchanged. Xray and sing-box track raw upload/download per user/source IP;
+machine mode reports per-interface cumulative NIC RX/TX separately. The agent
+never guesses a device platform from an IP address.
+
+Reports use process epochs and increasing sequence numbers. Source counters have
+their own random generations, so short-lived/recreated sources cannot reuse an
+old cumulative counter. Unacknowledged source samples are retained in bounded
+memory; acknowledged inactive sources expire after five minutes. At most 2,000
+sources are tracked per instance, with explicit incomplete-collection reporting
+on overflow. Large user counter sets rotate through bounded batches; failures
+back off and retry cumulative values. Unsent data is not durable across a process
+crash. Initial NIC/process readings establish a baseline at the panel.
+
+The nominal source sampling/report interval is about 20 seconds (the service's
+10-second tracker cadence with a 15-second minimum). Per-IP speed is an interval
+average in bytes/second, not an instantaneous packet rate. Xray preserves the
+native inbound reader required by mux/XUDP; observations are separate from its
+built-in billing statistics. Both direct and zero-copy sing-box traffic paths
+use the same upload/download direction.
+
 ## License
 
 MPL-2.0.
