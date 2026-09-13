@@ -87,7 +87,7 @@ jobs:
       - name: Upload staging cover artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: staging-cover-${{ github.sha }}
+          name: staging-cover-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/cover-public
           if-no-files-found: error
           retention-days: 7
@@ -115,7 +115,7 @@ jobs:
 
       - name: Build binaries
         env:
-          VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || github.sha }}
+          VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build-{0}-{1}', github.run_id, github.run_attempt) }}
         run: |
           if [ "${{ matrix.goarch }}" = "amd64" ]; then
             make build-linux
@@ -144,7 +144,7 @@ jobs:
       contents: read
       packages: write
     outputs:
-      digest: ${{ steps.push.outputs.digest }}
+      image_tag: build-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -173,7 +173,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=sha,format=long,prefix=sha-
+            type=raw,value=build-${{ github.run_id }}-${{ github.run_attempt }}
             type=ref,event=branch
             type=ref,event=tag
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/dev' }}
@@ -191,7 +191,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ github.sha }}
+            VERSION=build-${{ github.run_id }}-${{ github.run_attempt }}
             BUILD_TIME=${{ steps.build-time.outputs.value }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
