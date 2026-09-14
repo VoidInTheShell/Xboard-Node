@@ -5,6 +5,7 @@ import "context"
 type UsageCounter struct {
 	UserID    int    `json:"user_id,omitempty"`
 	Interface string `json:"interface,omitempty"`
+	Scope     string `json:"scope,omitempty"`
 	Up        int64  `json:"up"`
 	Down      int64  `json:"down"`
 }

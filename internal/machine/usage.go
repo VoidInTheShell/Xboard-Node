@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cedar2025/xboard-node/internal/monitor"
+	"github.com/cedar2025/xboard-node/internal/nlog"
 	"github.com/cedar2025/xboard-node/internal/panel"
 )
 
@@ -19,7 +20,12 @@ func (o *Orchestrator) reportUsage() {
 		o.usageEpoch = hex.EncodeToString(random[:])
 	}
 	rows, err := monitor.UsageInterfaces()
-	if err != nil || len(rows) > 64 {
+	if err != nil {
+		nlog.Core().Warn("network usage collection failed", "error", err)
+		return
+	}
+	if len(rows) > 64 {
+		nlog.Core().Warn("network usage interface limit exceeded")
 		return
 	}
 	o.usageSequence++
@@ -27,5 +33,7 @@ func (o *Orchestrator) reportUsage() {
 	defer cancel()
 	// Same process epoch, independent from proxy core restarts; backend differences
 	// cumulative NIC counters and handles reset by establishing a new baseline.
-	_ = o.client.ReportUsage(ctx, panel.UsageReport{Epoch: o.usageEpoch, Sequence: o.usageSequence, SampledAt: time.Now().Unix(), Counters: rows}, true)
+	if err := o.client.ReportUsage(ctx, panel.UsageReport{Epoch: o.usageEpoch, Sequence: o.usageSequence, SampledAt: time.Now().Unix(), Counters: rows}, true); err != nil {
+		nlog.Core().Warn("network usage report failed", "error", err)
+	}
 }

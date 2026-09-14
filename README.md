@@ -19,7 +19,7 @@ Node backend for [Xboard](https://github.com/cedar2025/Xboard). Supports `sing-b
 ```bash
 docker run -d --restart=always --network=host \
   -e apiHost=https://panel.com -e apiKey=TOKEN -e nodeID=1 \
-  ghcr.io/cedar2025/xboard-node:latest
+  ghcr.io/voidintheshell/xboard-node:${XBOARD_NODE_VERSION:?Set a published version tag}
 ```
 
 ### Docker Compose
@@ -81,6 +81,35 @@ sources are tracked per instance, with explicit incomplete-collection reporting
 on overflow. Large user counter sets rotate through bounded batches; failures
 back off and retry cumulative values. Unsent data is not durable across a process
 crash. Initial NIC/process readings establish a baseline at the panel.
+
+### Host network counters in Docker
+
+For machine mode in a Linux container, mount the host network counters and
+network metadata read-only. This also applies when the proxy uses bridge
+networking behind an existing reverse proxy; published ports stay unchanged.
+Add these entries to the existing Node service:
+
+```yaml
+environment:
+  XBOARD_HOST_NET_DEV: /run/xboard-host/net-dev
+  XBOARD_HOST_SYS: /run/xboard-host/sys
+volumes:
+  - /proc/1/net/dev:/run/xboard-host/net-dev:ro
+  - /sys:/run/xboard-host/sys:ro
+```
+
+Use `/proc/1/net/dev`, not `/proc/net/dev`: the latter can resolve to the
+container's network namespace. No privileged mode, host PID namespace, or
+network-mode change is required. Historical NIC usage and current network
+speed use the same selected interfaces; loopback, common virtual interfaces,
+and bridge/bond members are excluded to avoid duplicate counts.
+
+New panels expose each NIC's `collectionScope` (`host`, `container`, or
+`unknown` for older records) through the infrastructure API and MCP. A scope
+change starts a separate baseline. Old history remains intact and is not
+relabelled as host traffic. Without host mounts, containers report their own
+network counters. If an explicitly configured host source is unreadable,
+collection reports an error instead of falling back to container counters.
 
 The nominal source sampling/report interval is about 20 seconds (the service's
 10-second tracker cadence with a 15-second minimum). Per-IP speed is an interval

@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -11,7 +12,6 @@ import (
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/load"
 	"github.com/shirou/gopsutil/v4/mem"
-	"github.com/shirou/gopsutil/v4/net"
 )
 
 var startTime = time.Now()
@@ -53,17 +53,18 @@ type Status struct {
 
 // netBaseline tracks the previous network counters for rate calculation.
 var (
-	netMu       sync.Mutex
-	netPrevRecv uint64
-	netPrevSent uint64
-	netPrevTime time.Time
-	netHasBase  bool
+	netMu         sync.Mutex
+	netPrevRecv   uint64
+	netPrevSent   uint64
+	netPrevTime   time.Time
+	netHasBase    bool
+	netPrevSource string
 )
 
 // skipInterface returns true for loopback and common virtual interfaces.
 func skipInterface(name string) bool {
 	lower := strings.ToLower(name)
-	for _, prefix := range []string{"lo", "docker", "veth", "br-", "virbr", "vnet", "tun", "tap"} {
+	for _, prefix := range []string{"lo", "docker", "veth", "br-", "virbr", "vnet", "tun", "tap", "tailscale", "wg", "vxlan", "flannel", "cni"} {
 		if strings.HasPrefix(lower, prefix) {
 			return true
 		}
@@ -74,27 +75,29 @@ func skipInterface(name string) bool {
 // collectNetSpeed calculates network in/out bytes per second since last call.
 // Returns -1, -1 on first call or if counters decreased (reboot).
 func collectNetSpeed() (inSpeed, outSpeed float64) {
-	counters, err := net.IOCounters(true) // per-interface
+	counters, err := UsageInterfaces()
 	if err != nil {
 		nlog.Core().Debug("failed to get network counters", "error", err)
 		return -1, -1
 	}
 
 	var totalRecv, totalSent uint64
+	sources := make([]string, 0, len(counters))
 	for _, c := range counters {
-		if skipInterface(c.Name) {
-			continue
-		}
-		totalRecv += c.BytesRecv
-		totalSent += c.BytesSent
+		totalRecv += uint64(c.Up)
+		totalSent += uint64(c.Down)
+		sources = append(sources, c.Scope+":"+c.Interface)
 	}
+	sort.Strings(sources)
+	source := strings.Join(sources, ",")
 
 	now := time.Now()
 
 	netMu.Lock()
 	defer netMu.Unlock()
 
-	if !netHasBase {
+	if !netHasBase || netPrevSource != source {
+		netPrevSource = source
 		netPrevRecv, netPrevSent, netPrevTime, netHasBase = totalRecv, totalSent, now, true
 		return -1, -1
 	}

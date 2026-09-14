@@ -9,8 +9,13 @@ services:
     network_mode: host
     env_file:
       - ./runtime.env
+    environment:
+      XBOARD_HOST_NET_DEV: /run/xboard-host/net-dev
+      XBOARD_HOST_SYS: /run/xboard-host/sys
     volumes:
       - ./config.yml:/etc/xboard-node/config.yml:ro
+      - /proc/1/net/dev:/run/xboard-host/net-dev:ro
+      - /sys:/run/xboard-host/sys:ro
     mem_limit: 256m
     mem_reservation: 96m
     cpus: 1.0
