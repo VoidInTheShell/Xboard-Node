@@ -665,6 +665,38 @@ func buildHysteria(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel
 			}
 			base["masquerade"] = masquerade
 		}
+		if nc.FallbackSite != nil && nc.FallbackSite.Enabled {
+			site := nc.FallbackSite
+			switch strings.ToLower(strings.TrimSpace(site.Mode)) {
+			case "", "builtin", "upload":
+				contentType := site.ContentType
+				if contentType == "" {
+					contentType = "text/html; charset=utf-8"
+				}
+				base["masquerade"] = M{
+					"type": "string", "status_code": 200,
+					"headers": M{"content-type": contentType}, "content": site.Content,
+				}
+			case "proxy":
+				if site.Upstream != nil {
+					scheme := strings.ToLower(strings.TrimSpace(site.Upstream.Scheme))
+					if scheme == "" || scheme == "auto" {
+						if site.Upstream.Port == 443 {
+							scheme = "https"
+						} else {
+							scheme = "http"
+						}
+					}
+					base["masquerade"] = M{
+						"type":         "proxy",
+						"url":          scheme + "://" + net.JoinHostPort(site.Upstream.Host, strconv.Itoa(site.Upstream.Port)),
+						"rewrite_host": true,
+					}
+				}
+			case "raw":
+				base["masquerade"] = site.Raw
+			}
+		}
 	} else {
 		base["type"] = "hysteria"
 

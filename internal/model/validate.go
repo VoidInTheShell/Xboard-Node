@@ -1,7 +1,9 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 
@@ -45,6 +47,75 @@ func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 	}
 	if err := validateHysteria2Masquerade(n, kernelType); err != nil {
 		return err
+	}
+	if err := validateFallbackSite(n, kernelType); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateFallbackSite(n *NodeSpec, kernelType string) error {
+	site := n.FallbackSite
+	if site == nil || !site.Enabled {
+		return nil
+	}
+	protocol := strings.ToLower(strings.TrimSpace(n.Protocol))
+	mode := strings.ToLower(strings.TrimSpace(site.Mode))
+	if mode == "" {
+		mode = "builtin"
+	}
+	if kernelType == "xray" {
+		if protocol != "vless" && protocol != "trojan" {
+			return fmt.Errorf("fallback_site is only supported for Xray VLESS or Trojan inbounds")
+		}
+	} else if protocol != "hysteria" || n.Version != 2 {
+		return fmt.Errorf("fallback_site requires Xray VLESS/Trojan or sing-box Hysteria2")
+	}
+
+	switch mode {
+	case "builtin", "upload":
+		if site.Content == "" {
+			return fmt.Errorf("fallback_site content is required for %s mode", mode)
+		}
+		if len(site.Content) > 512*1024 {
+			return fmt.Errorf("fallback_site content exceeds 512 KiB")
+		}
+		if site.ContentType != "" && !strings.HasPrefix(strings.ToLower(site.ContentType), "text/html") {
+			return fmt.Errorf("fallback_site content_type must be text/html")
+		}
+	case "proxy":
+		if site.Upstream == nil {
+			return fmt.Errorf("fallback_site upstream is required for proxy mode")
+		}
+		host := strings.TrimSpace(site.Upstream.Host)
+		if host == "" || strings.ContainsAny(host, "/?#@ ") {
+			return fmt.Errorf("fallback_site upstream host is invalid")
+		}
+		if net.ParseIP(host) == nil && strings.Contains(host, ":") {
+			return fmt.Errorf("fallback_site upstream host is invalid")
+		}
+		if site.Upstream.Port < 1 || site.Upstream.Port > 65535 {
+			return fmt.Errorf("fallback_site upstream port must be between 1 and 65535")
+		}
+		scheme := strings.ToLower(strings.TrimSpace(site.Upstream.Scheme))
+		if scheme != "" && scheme != "auto" && scheme != "http" && scheme != "https" {
+			return fmt.Errorf("fallback_site upstream scheme must be auto, http or https")
+		}
+	case "raw":
+		if site.Raw == nil {
+			return fmt.Errorf("fallback_site raw configuration is required")
+		}
+		if kernelType == "xray" {
+			if _, ok := site.Raw.([]any); !ok {
+				return fmt.Errorf("Xray fallback_site raw configuration must be a JSON array")
+			}
+		}
+		data, err := json.Marshal(site.Raw)
+		if err != nil || len(data) > 64*1024 {
+			return fmt.Errorf("fallback_site raw configuration exceeds 64 KiB or is invalid")
+		}
+	default:
+		return fmt.Errorf("unsupported fallback_site mode %q", site.Mode)
 	}
 	return nil
 }

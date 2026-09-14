@@ -103,6 +103,7 @@ type NodeConfig struct {
 	ConfigRevision   int64             `json:"config_revision,omitempty"`
 	ConfigHash       string            `json:"config_hash,omitempty"`
 	RuleFiles        []RuleFileConfig  `json:"rule_files,omitempty"`
+	FallbackSite     *FallbackSite     `json:"fallback_site,omitempty"`
 
 	// Certificate settings (Xboard extension)
 	CertConfig *CertConfig `json:"cert_config,omitempty"`
@@ -184,6 +185,24 @@ type Hysteria2Masquerade struct {
 	Type        string `json:"type"`
 	URL         string `json:"url"`
 	RewriteHost bool   `json:"rewrite_host,omitempty"`
+}
+
+// FallbackSite is the high-level camouflage contract delivered by Xboard.
+// Built-in and uploaded pages arrive as resolved inline HTML; proxy and raw
+// modes retain their protocol-specific destination data.
+type FallbackSite struct {
+	Enabled     bool              `json:"enabled"`
+	Mode        string            `json:"mode"`
+	Content     string            `json:"content,omitempty"`
+	ContentType string            `json:"content_type,omitempty"`
+	Upstream    *FallbackUpstream `json:"upstream,omitempty"`
+	Raw         any               `json:"raw,omitempty"`
+}
+
+type FallbackUpstream struct {
+	Host   string `json:"host"`
+	Port   int    `json:"port"`
+	Scheme string `json:"scheme,omitempty"`
 }
 
 type MultiplexConfig struct {

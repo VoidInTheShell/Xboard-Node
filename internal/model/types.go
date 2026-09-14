@@ -19,6 +19,7 @@ type NodeSpec struct {
 	ConfigRevision   int64
 	ConfigHash       string
 	RuleFiles        []RuleFileSpec
+	FallbackSite     *FallbackSite
 	CertConfig       *config.CertConfig
 	AutoTLS          bool
 	Domain           string
@@ -66,6 +67,24 @@ type Hysteria2Masquerade struct {
 	Type        string
 	URL         string
 	RewriteHost bool
+}
+
+type FallbackSite struct {
+	Enabled     bool
+	Mode        string
+	Content     string
+	ContentType string
+	Upstream    *FallbackUpstream
+	Raw         any
+	// Destination is allocated by the local cover server and never participates
+	// in panel serialization or configuration hashing.
+	Destination string `json:"-"`
+}
+
+type FallbackUpstream struct {
+	Host   string
+	Port   int
+	Scheme string
 }
 
 type OutboundConfig struct {

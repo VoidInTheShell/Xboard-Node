@@ -90,7 +90,76 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 		mergeNativeConfig(cfg, nc)
 		injectNativeManagedCertificate(cfg, nc, tc)
 	}
+	applyManagedFallback(cfg, nc)
 	return cfg
+}
+
+func applyManagedFallback(cfg M, nc *model.NodeSpec) bool {
+	if nc == nil || nc.FallbackSite == nil || !nc.FallbackSite.Enabled {
+		return true
+	}
+	inbounds, ok := cfg["inbounds"].([]M)
+	if !ok || len(inbounds) == 0 {
+		return false
+	}
+	inbound := inbounds[0]
+	protocol := strings.ToLower(strings.TrimSpace(fmt.Sprint(inbound["protocol"])))
+	if protocol != "vless" && protocol != "trojan" {
+		return false
+	}
+	stream, _ := asNativeMap(inbound["streamSettings"])
+	if stream == nil {
+		return false
+	}
+	network := strings.ToLower(strings.TrimSpace(fmt.Sprint(stream["network"])))
+	if network == "" {
+		network = "tcp"
+	}
+	security := strings.ToLower(strings.TrimSpace(fmt.Sprint(stream["security"])))
+	if (network != "tcp" && network != "raw") || security != "tls" {
+		return false
+	}
+
+	settings, _ := asNativeMap(inbound["settings"])
+	if settings == nil {
+		settings = M{}
+		inbound["settings"] = settings
+	}
+	site := nc.FallbackSite
+	mode := strings.ToLower(strings.TrimSpace(site.Mode))
+	switch mode {
+	case "", "builtin", "upload":
+		if site.Destination == "" {
+			return false
+		}
+		settings["fallbacks"] = []M{{"dest": site.Destination}}
+	case "proxy":
+		if site.Upstream == nil || site.Destination == "" {
+			return false
+		}
+		settings["fallbacks"] = []M{{"dest": site.Destination}}
+	case "raw":
+		fallbacks, ok := site.Raw.([]any)
+		if !ok {
+			return false
+		}
+		settings["fallbacks"] = fallbacks
+	default:
+		return false
+	}
+
+	// The managed page and reverse-proxy modes speak HTTP/1.1 behind Xray.
+	// Raw mode leaves the administrator's native ALPN behavior untouched.
+	if mode == "raw" {
+		return true
+	}
+	tlsSettings, _ := asNativeMap(stream["tlsSettings"])
+	if tlsSettings == nil {
+		tlsSettings = M{}
+		stream["tlsSettings"] = tlsSettings
+	}
+	tlsSettings["alpn"] = []string{"http/1.1"}
+	return true
 }
 
 // injectNativeManagedCertificate fills the certificate material for a native

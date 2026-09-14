@@ -30,6 +30,7 @@ import (
 	_ "github.com/xtls/xray-core/main/distro/all"
 
 	"github.com/cedar2025/xboard-node/internal/config"
+	"github.com/cedar2025/xboard-node/internal/cover"
 	"github.com/cedar2025/xboard-node/internal/kernel"
 	"github.com/cedar2025/xboard-node/internal/kernel/geodata"
 	"github.com/cedar2025/xboard-node/internal/model"
@@ -71,6 +72,7 @@ type Xray struct {
 	effectiveHash   string
 	cumTraffic      map[int][2]int64
 	speedLimitFunc  func(string) *rate.Limiter
+	cover           *cover.Manager
 
 	// running is set after a successful Start and cleared before shutdown.
 	// Atomic so IsRunning / GetConnections never block.
@@ -81,6 +83,7 @@ func New(cfg config.KernelConfig) *Xray {
 	return &Xray{
 		cfg:        cfg,
 		cumTraffic: make(map[int][2]int64),
+		cover:      cover.New(),
 	}
 }
 
@@ -135,6 +138,13 @@ func (x *Xray) startLocked(nodeConfig *model.NodeSpec, users []model.UserSpec, t
 	// later panel event is being decoded.
 	nodeConfig = cloneNodeSpecForRuntime(nodeConfig)
 	users = append([]model.UserSpec(nil), users...)
+	if usesManagedFallbackDestination(nodeConfig) {
+		destination, err := x.cover.Ensure()
+		if err != nil {
+			return fmt.Errorf("start fallback site: %w", err)
+		}
+		nodeConfig.FallbackSite.Destination = destination
+	}
 
 	// ── Phase 1: Build config (no shared state) ─────────────────────────
 	x.ensureGeoData(nodeConfig)
@@ -201,6 +211,7 @@ func (x *Xray) startLocked(nodeConfig *model.NodeSpec, users []model.UserSpec, t
 	x.effectiveHash = fmt.Sprintf("%x", sha256.Sum256(data))
 	x.running.Store(true)
 	x.mu.Unlock()
+	x.commitFallbackSite(nodeConfig)
 
 	// ── Phase 5: Apply dynamic limits to the activated instance ───────────
 	x.updateDispatcherLimits(users)
@@ -258,6 +269,28 @@ func (x *Xray) Stop() {
 	if ld != nil {
 		ld.ResetConns()
 	}
+	x.cover.Close()
+}
+
+func usesManagedFallbackDestination(nodeConfig *model.NodeSpec) bool {
+	if nodeConfig == nil || nodeConfig.FallbackSite == nil || !nodeConfig.FallbackSite.Enabled {
+		return false
+	}
+	mode := strings.ToLower(strings.TrimSpace(nodeConfig.FallbackSite.Mode))
+	return mode == "builtin" || mode == "upload" || mode == "proxy" || mode == ""
+}
+
+func (x *Xray) commitFallbackSite(nodeConfig *model.NodeSpec) {
+	if usesManagedFallbackDestination(nodeConfig) {
+		site := nodeConfig.FallbackSite
+		if strings.EqualFold(strings.TrimSpace(site.Mode), "proxy") && site.Upstream != nil {
+			x.cover.CommitProxy(site.Upstream.Host, site.Upstream.Port, site.Upstream.Scheme)
+			return
+		}
+		x.cover.Commit(site.Content, site.ContentType)
+		return
+	}
+	x.cover.Disable()
 }
 
 func (x *Xray) EffectiveConfigHash() string {
@@ -717,6 +750,9 @@ func marshalConfig(cfg config.KernelConfig, nc *model.NodeSpec, users []model.Us
 		return nil, err
 	}
 	cfgMap := buildConfig(cfg, nc, users, tls)
+	if nc.FallbackSite != nil && nc.FallbackSite.Enabled && !applyManagedFallback(cfgMap, nc) {
+		return nil, fmt.Errorf("fallback_site requires a VLESS or Trojan TCP + TLS inbound")
+	}
 	if len(nc.XrayConfig) > 0 {
 		if err := validateEffectiveReferences(cfgMap); err != nil {
 			return nil, err

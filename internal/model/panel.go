@@ -54,6 +54,23 @@ func NodeSpecFromPanel(nc *panel.NodeConfig) *NodeSpec {
 		}
 	}
 
+	var fallbackSite *FallbackSite
+	if nc.FallbackSite != nil {
+		fallbackSite = &FallbackSite{
+			Enabled:     nc.FallbackSite.Enabled,
+			Mode:        nc.FallbackSite.Mode,
+			Content:     nc.FallbackSite.Content,
+			ContentType: nc.FallbackSite.ContentType,
+			Raw:         nc.FallbackSite.Raw,
+		}
+		if nc.FallbackSite.Upstream != nil {
+			fallbackSite.Upstream = &FallbackUpstream{
+				Host: nc.FallbackSite.Upstream.Host, Port: nc.FallbackSite.Upstream.Port,
+				Scheme: nc.FallbackSite.Upstream.Scheme,
+			}
+		}
+	}
+
 	routes := make([]RouteRule, 0, len(nc.Routes))
 	for _, route := range nc.Routes {
 		routes = append(routes, RouteRule{
@@ -119,6 +136,7 @@ func NodeSpecFromPanel(nc *panel.NodeConfig) *NodeSpec {
 		ConfigRevision:      nc.ConfigRevision,
 		ConfigHash:          nc.ConfigHash,
 		RuleFiles:           ruleFiles,
+		FallbackSite:        fallbackSite,
 		CertConfig:          certCfg,
 		AutoTLS:             nc.AutoTLS,
 		Domain:              nc.Domain,
@@ -215,6 +233,21 @@ func (n *NodeSpec) ToPanel() *panel.NodeConfig {
 		}
 	}
 
+	var fallbackSite *panel.FallbackSite
+	if n.FallbackSite != nil {
+		fallbackSite = &panel.FallbackSite{
+			Enabled: n.FallbackSite.Enabled, Mode: n.FallbackSite.Mode,
+			Content: n.FallbackSite.Content, ContentType: n.FallbackSite.ContentType,
+			Raw: n.FallbackSite.Raw,
+		}
+		if n.FallbackSite.Upstream != nil {
+			fallbackSite.Upstream = &panel.FallbackUpstream{
+				Host: n.FallbackSite.Upstream.Host, Port: n.FallbackSite.Upstream.Port,
+				Scheme: n.FallbackSite.Upstream.Scheme,
+			}
+		}
+	}
+
 	routes := make([]panel.RouteRule, 0, len(n.Routes))
 	for _, route := range n.Routes {
 		routes = append(routes, panel.RouteRule{
@@ -280,6 +313,7 @@ func (n *NodeSpec) ToPanel() *panel.NodeConfig {
 		ConfigRevision:      n.ConfigRevision,
 		ConfigHash:          n.ConfigHash,
 		RuleFiles:           ruleFiles,
+		FallbackSite:        fallbackSite,
 		CertConfig:          certCfg,
 		AutoTLS:             n.AutoTLS,
 		Domain:              n.Domain,
