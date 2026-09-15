@@ -7,6 +7,8 @@ the next development cycle after a formal release.
 ## Publish
 
 - A dev push publishes the final commit as vNEXT-dev.RUN_ID.RUN_ATTEMPT.
+  A push containing multiple commits produces one version from that event's tip,
+  not one version per commit. Later branch changes do not change its source.
 - Run the existing workflow on dev with release_version=v1.14.0 to publish a formal
   version. The input must match next_version. No merge or deployment is performed
   by this formal publishing operation.
@@ -30,7 +32,8 @@ Every public release contains release-manifest.json:
 - image: ghcr.io/voidintheshell/xboard-node:VERSION;
 - platforms: linux/amd64 and linux/arm64;
 - compatibility.panel_contract=1 and compatibility.update_protocol=1;
-- update_capability=external-executor-required: an updater is not bundled yet.
+- update_capability=external-executor-required: enroll the independent
+  `xbctl updater` service using updater.sample.json before submitting tasks.
 - binaries: architecture-specific xboard-node/xbctl asset URLs, plus installer URL.
 - Release assets include install.sh, compose.sample.yaml and config.yml.example.
   The installer asset defaults to its exact release version. Use the installation
