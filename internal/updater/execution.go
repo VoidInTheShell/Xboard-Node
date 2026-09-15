@@ -45,6 +45,9 @@ func (a *Agent) hook(ctx context.Context, j *Journal, args []string) error {
 func (a *Agent) taskDir(j *Journal) string { return filepath.Join(a.Config.StateDir, j.Task.ID) }
 func (a *Agent) compose(ctx context.Context, t Target, extra []string, args ...string) (string, error) {
 	base := []string{"compose", "--project-name", t.ComposeProject, "--file", t.ComposeFile}
+	if t.ComposeEnvFile != "" {
+		base = append(base, "--env-file", t.ComposeEnvFile)
+	}
 	persistent := filepath.Join(a.Config.StateDir, "compose-"+t.ComposeProject+".json")
 	if _, err := os.Stat(persistent); err == nil {
 		base = append(base, "--file", persistent)

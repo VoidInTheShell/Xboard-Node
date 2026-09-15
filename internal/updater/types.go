@@ -31,6 +31,7 @@ type Target struct {
 	Service        string `json:"service,omitempty"`
 	Container      string `json:"container,omitempty"`
 	ComposeFile    string `json:"compose_file,omitempty"`
+	ComposeEnvFile string `json:"compose_env_file,omitempty"`
 	ComposeProject string `json:"compose_project,omitempty"`
 	ComposeService string `json:"compose_service,omitempty"`
 	HealthURL      string `json:"health_url"`
@@ -151,6 +152,9 @@ func (c Config) Validate() error {
 			}
 			resource = "container:" + t.Container
 		case "compose":
+			if t.ComposeEnvFile != "" && !filepath.IsAbs(t.ComposeEnvFile) {
+				return errors.New("compose_env_file must be absolute")
+			}
 			if !filepath.IsAbs(t.ComposeFile) || !namePattern.MatchString(t.ComposeProject) || !namePattern.MatchString(t.ComposeService) {
 				return errors.New("compose target requires absolute file, project and service")
 			}
