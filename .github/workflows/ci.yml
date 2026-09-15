@@ -3,10 +3,14 @@ name: CI and Publish
 on:
   push:
     branches: ["**"]
-    tags: ["v*"]
   pull_request:
     branches: ["**"]
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Formal version (vX.Y.Z); publish only, never deploy. Empty keeps the transitional workflow."
+        required: false
+        type: string
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -95,7 +99,10 @@ jobs:
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, prepare-release]
+    if: >-
+      always() && needs.test.result == 'success' &&
+      (needs.prepare-release.result == 'success' || github.event_name == 'pull_request')
     strategy:
       matrix:
         include:
@@ -106,6 +113,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.prepare-release.outputs.checkout_ref || github.sha }}
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -115,12 +124,25 @@ jobs:
 
       - name: Build binaries
         env:
-          VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build-{0}-{1}', github.run_id, github.run_attempt) }}
+          VERSION: ${{ needs.prepare-release.outputs.version || format('build-{0}-{1}', github.run_id, github.run_attempt) }}
         run: |
           if [ "${{ matrix.goarch }}" = "amd64" ]; then
+            test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
             make build-linux
           else
+            test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
             make build-linux-arm64
+          fi
+
+      - name: Verify binary version and architecture
+        env:
+          EXPECTED_VERSION: ${{ needs.prepare-release.outputs.version || format('build-{0}-{1}', github.run_id, github.run_attempt) }}
+          TARGET_ARCH: ${{ matrix.goarch }}
+        run: |
+          file "xboard-node-linux-$TARGET_ARCH" "xbctl-linux-$TARGET_ARCH"
+          if [ "$TARGET_ARCH" = amd64 ]; then
+            ./xboard-node-linux-amd64 -v | grep -F -- "$EXPECTED_VERSION"
+            ./xbctl-linux-amd64 version | grep -F -- "$EXPECTED_VERSION"
           fi
 
       - name: Upload xboard-node artifact
@@ -135,19 +157,52 @@ jobs:
           name: xbctl-${{ matrix.goos }}-${{ matrix.goarch }}
           path: xbctl-${{ matrix.goos }}-${{ matrix.goarch }}
 
+
+  prepare-release:
+    name: Freeze version and release plan
+    if: github.event_name != 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      publish: ${{ steps.plan.outputs.publish }}
+      plan_artifact: release-plan-${{ steps.plan.outputs.version }}
+      checkout_ref: ${{ steps.plan.outputs.checkout_ref }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+      - name: Prepare exact version
+        id: plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+        run: python3 .github/scripts/release.py prepare
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-plan-${{ steps.plan.outputs.version }}
+          overwrite: true
+          path: ${{ runner.temp }}/release-manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
   build-and-push:
     name: Publish multi-architecture image
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, prepare-release]
     permissions:
       contents: read
       packages: write
     outputs:
-      image_tag: build-${{ github.run_id }}-${{ github.run_attempt }}
+      image_tag: ${{ needs.prepare-release.outputs.version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.prepare-release.outputs.checkout_ref }}
 
       - name: Set build time
         id: build-time
@@ -167,21 +222,33 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+
+      - name: Verify checkout and load frozen plan
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ${{ needs.prepare-release.outputs.plan_artifact }}
+          path: ${{ runner.temp }}
+      - name: Preserve an already built version on retry
+        id: existing-image
+        run: python3 .github/scripts/release.py image-check
+
       - name: Generate image metadata
         id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: latest=false
           tags: |
-            type=raw,value=build-${{ github.run_id }}-${{ github.run_attempt }}
-            type=ref,event=branch
-            type=ref,event=tag
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/dev' }}
+            type=raw,value=${{ needs.prepare-release.outputs.version }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Build and push image
+        if: steps.existing-image.outputs.exists != 'true'
         id: push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -191,36 +258,54 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=build-${{ github.run_id }}-${{ github.run_attempt }}
+            VERSION=${{ needs.prepare-release.outputs.version }}
             BUILD_TIME=${{ steps.build-time.outputs.value }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: true
 
+      - name: Verify published runtime version on both architectures
+        env:
+          EXPECTED_VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          image="${REGISTRY}/${IMAGE_NAME}:${EXPECTED_VERSION}"
+          for platform in linux/amd64 linux/arm64; do
+            actual=$(docker run --rm --platform "$platform" --entrypoint xboard-node "$image" -v | awk '{print $2}')
+            test "$actual" = "$EXPECTED_VERSION"
+          done
+
   release:
-    name: Release binaries
+    name: Publish complete version
+    needs: [prepare-release, build-and-push, build]
+    if: needs.prepare-release.outputs.publish == 'true'
     runs-on: ubuntu-latest
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/dev'
     permissions:
       contents: write
+      packages: read
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ needs.prepare-release.outputs.checkout_ref }}
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ${{ needs.prepare-release.outputs.plan_artifact }}
+          path: ${{ runner.temp }}
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: "*-linux-*"
           merge-multiple: true
-          path: dist
-
-      - name: Publish release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}
-          make_latest: ${{ startsWith(github.ref, 'refs/tags/') }}
-          files: |
-            dist/xboard-node-linux-amd64
-            dist/xboard-node-linux-arm64
-            dist/xbctl-linux-amd64
-            dist/xbctl-linux-arm64
+          path: release-binaries
+      - name: Publish only after every required artifact is ready
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 .github/scripts/release.py complete

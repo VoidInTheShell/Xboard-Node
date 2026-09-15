@@ -27,7 +27,7 @@ DEFAULT_ACTION="install"
 DEFAULT_RELEASE_VERSION="latest"
 DEFAULT_LOG_LEVEL="info"
 DEFAULT_KERNEL_LOG_LEVEL="warn"
-DEFAULT_DOWNLOAD_BASE="https://github.com/cedar2025/xboard-node/releases"
+DEFAULT_DOWNLOAD_BASE="https://github.com/VoidInTheShell/Xboard-Node/releases"
 
 ACTION="${DEFAULT_ACTION}"
 MODE=""
@@ -480,6 +480,25 @@ select_binary_source() {
     echo ""
 }
 
+resolve_release_version() {
+    if [ "$RELEASE_VERSION" = "latest" ]; then
+        local metadata
+        metadata=$(curl -fsSL --retry 3 'https://api.github.com/repos/VoidInTheShell/Xboard-Node/releases/latest') || {
+            log_error "Cannot resolve an owned stable release; choose an available version with --version"
+            return 1
+        }
+        RELEASE_VERSION=$(printf '%s' "$metadata" | sed -nE 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -1)
+        if [[ "$RELEASE_VERSION" == *-dev.* ]]; then
+            log_error "latest must resolve to a stable release; select a development version explicitly"
+            return 1
+        fi
+    fi
+    if ! [[ "$RELEASE_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-dev\.[1-9][0-9]*\.[1-9][0-9]*)?$ ]]; then
+        log_error "Expected an exact vX.Y.Z or vX.Y.Z-dev.RUN.ATTEMPT release"
+        return 1
+    fi
+}
+
 resolve_download_url() {
     local artifact="$1"
     if [ "$RELEASE_VERSION" = "latest" ]; then
@@ -508,6 +527,14 @@ stage_binary() {
     if ! "$staged" -v >/dev/null 2>&1; then
         log_error "Downloaded binary failed version check"
         exit 1
+    fi
+    if [ -z "$local_src" ]; then
+        local reported
+        reported=$("$staged" -v | awk '{print $2}')
+        if [ "$reported" != "$RELEASE_VERSION" ]; then
+            log_error "Downloaded binary does not report the selected release"
+            exit 1
+        fi
     fi
 }
 
@@ -540,6 +567,14 @@ stage_xbctl() {
     if ! "$staged" version > /dev/null 2>&1; then
         log_error "Downloaded xbctl failed version check"
         exit 1
+    fi
+    if [ -z "$local_src" ]; then
+        local reported
+        reported=$("$staged" version | awk '{print $2}')
+        if [ "$reported" != "$RELEASE_VERSION" ]; then
+            log_error "Downloaded xbctl does not report the selected release"
+            exit 1
+        fi
     fi
 }
 
@@ -592,7 +627,7 @@ render_service() {
     cat >"$TMP_DIR/${SERVICE_NAME}" <<EOF_UNIT
 [Unit]
 Description=Xboard Node Backend
-Documentation=https://github.com/cedar2025/xboard-node
+Documentation=https://github.com/VoidInTheShell/Xboard-Node
 After=network-online.target
 Wants=network-online.target
 
@@ -724,6 +759,11 @@ perform_install() {
         log_info "Health: http://127.0.0.1:${HEALTH_PORT}/healthz"
     fi
     log_info "CLI: ${CLI_PATH}  (run '${CLI_PATH} list' if xbctl is not in PATH)"
+    if [ -f /etc/xboard-updater/config.json ]; then
+        "$CLI_PATH" updater install --config /etc/xboard-updater/config.json
+    else
+        log_info "Host updater included in xbctl. Enroll this installation with updater.sample.json and 'xbctl updater install'."
+    fi
 }
 
 perform_upgrade() {
@@ -830,6 +870,13 @@ main() {
     detect_os
     ensure_systemd
     install_dependencies
+
+    # Resolve once so Node and xbctl cannot download two different latest releases.
+    if [ "$ACTION" = "install" ] || [ "$ACTION" = "upgrade" ]; then
+        if [ -z "$BINARY_SOURCE" ] || [ -z "$CLI_BINARY_SOURCE" ]; then
+            resolve_release_version
+        fi
+    fi
 
     case "$ACTION" in
         install)

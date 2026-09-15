@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/cedar2025/xboard-node/internal/config"
+	"github.com/cedar2025/xboard-node/internal/updater"
 	"gopkg.in/yaml.v3"
 )
 
@@ -30,7 +32,7 @@ const (
 	serviceName            = "xboard-node.service"
 	serviceFilePath        = "/etc/systemd/system/xboard-node.service"
 	defaultInstallRoot     = "/etc/xboard-node"
-	downloadBase           = "https://github.com/cedar2025/xboard-node/releases"
+	downloadBase           = "https://github.com/VoidInTheShell/Xboard-Node/releases"
 )
 
 var (
@@ -54,7 +56,7 @@ type fileRootConfig struct {
 	WS        *config.WSConfig   `yaml:"ws,omitempty"`
 	Runtime   *fileRuntimeConfig `yaml:"runtime,omitempty"`
 	Cert      *config.CertConfig `yaml:"cert,omitempty"`
-	Instances []fileInstance      `yaml:"instances,omitempty"`
+	Instances []fileInstance     `yaml:"instances,omitempty"`
 }
 
 type fileInstance struct {
@@ -154,6 +156,8 @@ func run(args []string) error {
 		return nil
 	}
 	switch args[0] {
+	case "updater":
+		return updater.CLI(args[1:])
 	case "status":
 		return runStatus()
 	case "list":
@@ -198,6 +202,7 @@ func run(args []string) error {
 func printUsage() {
 	fmt.Println(`xbctl commands:
   xbctl help
+  xbctl updater check|install|run --config /etc/xboard-updater/config.json
   xbctl status
   xbctl list [--output text|json]
   xbctl instance list [--output text|json]
@@ -400,6 +405,12 @@ func runUpgrade(args []string) error {
 	}
 
 	fmt.Println("Starting upgrade...")
+	// Freeze latest once before downloading the two matching executables.
+	resolvedVersion, err := resolveReleaseVersion(version)
+	if err != nil {
+		return err
+	}
+	version = resolvedVersion
 
 	binaryDir := filepath.Dir(defaultBinaryPath)
 	cliDir := filepath.Dir(defaultCLIPath)
@@ -428,10 +439,10 @@ func runUpgrade(args []string) error {
 	}
 
 	// Validate downloaded binaries
-	if out, err := exec.Command(newBinary, "-v").CombinedOutput(); err != nil {
+	if out, err := exec.Command(newBinary, "-v").CombinedOutput(); err != nil || !reportsRelease(out, "xboard-node", version) {
 		return cleanupFiles(newBinary, newCLI, fmt.Errorf("binary version check failed: %s", string(out)))
 	}
-	if out, err := exec.Command(newCLI, "version").CombinedOutput(); err != nil {
+	if out, err := exec.Command(newCLI, "version").CombinedOutput(); err != nil || !reportsRelease(out, "xbctl", version) {
 		return cleanupFiles(newBinary, newCLI, fmt.Errorf("xbctl version check failed: %s", string(out)))
 	}
 
@@ -590,6 +601,43 @@ func ensureRoot(cmd string) error {
 		return fmt.Errorf("%s requires root privileges; run with sudo", cmd)
 	}
 	return nil
+}
+
+var releaseVersionPattern = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-dev\.[1-9][0-9]*\.[1-9][0-9]*)?$`)
+
+func reportsRelease(out []byte, program, expected string) bool {
+	fields := strings.Fields(string(out))
+	return len(fields) >= 2 && fields[0] == program && fields[1] == expected
+}
+
+func resolveReleaseVersion(selected string) (string, error) {
+	if selected == "latest" {
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Get("https://api.github.com/repos/VoidInTheShell/Xboard-Node/releases/latest")
+		if err != nil {
+			return "", fmt.Errorf("resolve owned stable release: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("resolve owned stable release: HTTP %d; use --version for an explicit release", resp.StatusCode)
+		}
+		var release struct {
+			Tag        string `json:"tag_name"`
+			Draft      bool   `json:"draft"`
+			Prerelease bool   `json:"prerelease"`
+		}
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 1024*1024)).Decode(&release); err != nil {
+			return "", fmt.Errorf("read owned release: %w", err)
+		}
+		if release.Draft || release.Prerelease || strings.Contains(release.Tag, "-dev.") {
+			return "", errors.New("latest must be a published stable release")
+		}
+		selected = release.Tag
+	}
+	if !releaseVersionPattern.MatchString(selected) {
+		return "", errors.New("expected vX.Y.Z or vX.Y.Z-dev.RUN.ATTEMPT")
+	}
+	return selected, nil
 }
 
 func resolveDownloadURL(artifact, version string) string {
@@ -1157,7 +1205,7 @@ func latestInstanceID(instances []*config.Config) string {
 func regenerateServiceFile() error {
 	unit := fmt.Sprintf(`[Unit]
 Description=Xboard Node Backend
-Documentation=https://github.com/cedar2025/xboard-node
+Documentation=https://github.com/VoidInTheShell/Xboard-Node
 After=network-online.target
 Wants=network-online.target
 

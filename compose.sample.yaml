@@ -1,0 +1,18 @@
+# Download this file and config.yml.example from the same owned release.
+# Copy config.yml.example to config.yml and configure a node/machine binding.
+# Set XBOARD_NODE_VERSION to the exact release version before starting.
+services:
+  xboard-node:
+    image: ghcr.io/voidintheshell/xboard-node:${XBOARD_NODE_VERSION:?Set an exact published release version}
+    restart: unless-stopped
+    init: true
+    network_mode: host
+    volumes:
+      - ./config.yml:/etc/xboard-node/config.yml:ro
+      - ./certs:/etc/xboard-node/certs
+      - ./state:/etc/xboard-node/state
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,16 @@
+{
+  "panel_url": "https://panel.example.com",
+  "token_file": "/etc/xboard-updater/token",
+  "state_dir": "/var/lib/xboard-updater",
+  "targets": [
+    {
+      "id": "primary",
+      "name": "Primary node installation",
+      "component": "xboard-node",
+      "method": "systemd",
+      "binary": "/usr/local/bin/xboard-node",
+      "service": "xboard-node.service",
+      "health_url": "http://127.0.0.1:65530/healthz"
+    }
+  ]
+}

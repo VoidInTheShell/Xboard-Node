@@ -1,6 +1,6 @@
 # xboard-node
 
-Node backend for [Xboard](https://github.com/cedar2025/Xboard). Supports `sing-box` / `xray-core` dual kernels.
+Node backend for [Xboard](https://github.com/VoidInTheShell/Xboard). Supports `sing-box` / `xray-core` dual kernels.
 
 > **Disclaimer**: This project is for educational and learning purposes only.
 
@@ -25,22 +25,31 @@ docker run -d --restart=always --network=host \
 ### Docker Compose
 
 ```bash
-git clone -b compose --depth 1 https://github.com/cedar2025/xboard-node.git
-cd xboard-node
-vim config/config.yml   # set panel.url / token / node_id
-docker compose up -d
+export XBOARD_NODE_VERSION=v1.14.0 # replace with an actually published version
+curl -fLO "https://github.com/VoidInTheShell/Xboard-Node/releases/download/${XBOARD_NODE_VERSION}/compose.sample.yaml"
+curl -fLO "https://github.com/VoidInTheShell/Xboard-Node/releases/download/${XBOARD_NODE_VERSION}/config.yml.example"
+cp config.yml.example config.yml
+vim config.yml # configure the panel and node/machine binding
+docker compose -f compose.sample.yaml up -d
 ```
 
 ### Installer (Linux systemd)
 
 ```bash
 # Node mode
-curl -fsSL https://raw.githubusercontent.com/cedar2025/xboard-node/dev/install.sh | \
+curl -fsSL https://github.com/VoidInTheShell/Xboard-Node/releases/latest/download/install.sh | \
   sudo bash -s -- --mode node --panel https://panel.example.com --token TOKEN --node-id 1
 
 # Machine mode
-curl -fsSL https://raw.githubusercontent.com/cedar2025/xboard-node/dev/install.sh | \
+curl -fsSL https://github.com/VoidInTheShell/Xboard-Node/releases/latest/download/install.sh | \
   sudo bash -s -- --mode machine --panel https://panel.example.com --token TOKEN --machine-id 1
+
+```
+
+The release installer pins its own version for both executables. For development
+versions, replace `latest/download` with `download/<exact-dev-version>`. The first
+versioned release must exist before these commands can be used; historical rolling
+`dev` releases are not compatible with this installer contract.
 
 ## xbctl
 
@@ -117,6 +126,10 @@ average in bytes/second, not an instantaneous packet rate. Xray preserves the
 native inbound reader required by mux/XUDP; observations are separate from its
 built-in billing statistics. Both direct and zero-copy sing-box traffic paths
 use the same upload/download direction.
+
+## Panel-managed updates
+
+An independent Linux host service can apply the exact version selected in Admin or through MCP to a single Node installation. See [UPDATER.md](UPDATER.md) for enrollment, systemd/Docker/Compose targets, persisted version selections, and recovery. Publishing a release does not automatically update enrolled hosts.
 
 ## License
 
