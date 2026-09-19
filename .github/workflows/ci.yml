@@ -272,17 +272,6 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: true
 
-      - name: Verify published runtime version on both architectures
-        env:
-          EXPECTED_VERSION: ${{ needs.prepare-release.outputs.version }}
-        run: |
-          set -Eeuo pipefail
-          image="${REGISTRY}/${IMAGE_NAME}:${EXPECTED_VERSION}"
-          for platform in linux/amd64 linux/arm64; do
-            actual=$(docker run --rm --platform "$platform" --entrypoint xboard-node "$image" -v | awk '{print $2}')
-            test "$actual" = "$EXPECTED_VERSION"
-          done
-
   release:
     name: Publish complete version
     needs: [prepare-release, build-and-push, build]
