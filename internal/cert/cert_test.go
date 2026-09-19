@@ -234,3 +234,87 @@ func TestACMEFingerprintEnvOrderStable(t *testing.T) {
 		t.Fatal("fingerprint not order-independent")
 	}
 }
+
+func TestSelfSignedRevisionRenewalReplacesPersistedMaterial(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	initial := config.CertConfig{
+		CertMode: "self",
+		Domain:   "old.example.test",
+		CertDir:  dir,
+		Revision: 1,
+	}
+	manager := NewManager(initial)
+	if err := manager.Start(ctx); err != nil {
+		t.Fatalf("start initial self-signed manager: %v", err)
+	}
+	old := manager.TLSCert()
+
+	renewed := initial
+	renewed.Domain = "new.example.test"
+	renewed.Revision = 2
+	changed, err := manager.Reconfigure(ctx, renewed)
+	if err != nil {
+		t.Fatalf("renew self-signed manager: %v", err)
+	}
+	if !changed {
+		t.Fatal("revision renewal reused the previous self-signed material")
+	}
+	current := manager.TLSCert()
+	if string(current.CertPEM) == string(old.CertPEM) || string(current.KeyPEM) == string(old.KeyPEM) {
+		t.Fatal("revision renewal did not replace persisted certificate material")
+	}
+
+	block, _ := pem.Decode(current.CertPEM)
+	if block == nil {
+		t.Fatal("renewed certificate is not PEM encoded")
+	}
+	certificate, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse renewed certificate: %v", err)
+	}
+	if err := certificate.VerifyHostname("new.example.test"); err != nil {
+		t.Fatalf("renewed certificate does not cover the desired domain: %v", err)
+	}
+	if err := certificate.VerifyHostname("old.example.test"); err == nil {
+		t.Fatal("renewed certificate still covers the old domain")
+	}
+}
+
+func TestSelfSignedRestartReusesMatchingMultiDomainMaterial(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.CertConfig{
+		CertMode: "self",
+		Domain:   "one.example.test",
+		Domains:  []string{"one.example.test", "two.example.test"},
+		CertDir:  dir,
+		Revision: 1,
+	}
+	first := NewManager(cfg)
+	if err := first.Start(context.Background()); err != nil {
+		t.Fatalf("start first self-signed manager: %v", err)
+	}
+	firstTLS := first.TLSCert()
+
+	second := NewManager(cfg)
+	if err := second.Start(context.Background()); err != nil {
+		t.Fatalf("restart self-signed manager: %v", err)
+	}
+	secondTLS := second.TLSCert()
+	if string(secondTLS.CertPEM) != string(firstTLS.CertPEM) || string(secondTLS.KeyPEM) != string(firstTLS.KeyPEM) {
+		t.Fatal("restart did not reuse matching persisted certificate material")
+	}
+	block, _ := pem.Decode(secondTLS.CertPEM)
+	if block == nil {
+		t.Fatal("persisted certificate is not PEM encoded")
+	}
+	certificate, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse persisted certificate: %v", err)
+	}
+	for _, domain := range cfg.Domains {
+		if err := certificate.VerifyHostname(domain); err != nil {
+			t.Fatalf("persisted certificate does not cover %q: %v", domain, err)
+		}
+	}
+}

@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/cedar2025/xboard-node/internal/cert"
 	"github.com/cedar2025/xboard-node/internal/config"
 	"github.com/cedar2025/xboard-node/internal/controlplane"
 	"github.com/cedar2025/xboard-node/internal/model"
@@ -38,6 +40,7 @@ type Orchestrator struct {
 	usageSequence uint64
 	cfg           *config.Config
 	client        *panel.Client // machine-level client (no node_id)
+	certificates  *cert.Store
 
 	// reconcileMu serializes discovery transitions with shutdown.  A WS
 	// sync.nodes callback is deliberately asynchronous, so without this guard
@@ -85,6 +88,7 @@ func New(cfg *config.Config) *Orchestrator {
 	return &Orchestrator{
 		cfg:              cfg,
 		client:           panel.NewClient(panelCfg),
+		certificates:     cert.NewStore(),
 		nodes:            make(map[int]*nodeHandle),
 		mailboxes:        make(map[int]*controlplane.NodeMailbox),
 		statuses:         make(map[int]chan<- controlplane.StatusChange),
@@ -111,6 +115,9 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	} else {
 		o.setMachineUnavailable(false)
 		o.applyIntervals(nodesResp.BaseConfig)
+		if err := o.reconcileCertificates(ctx, nodesResp.Certificates); err != nil {
+			nlog.Core().Warn("initial machine certificate reconciliation had resource errors; continuing node discovery", "error", err)
+		}
 		nlog.Core().Info(fmt.Sprintf("machine %d: discovered %d nodes",
 			o.cfg.Machine.MachineID, len(nodesResp.Nodes)))
 
@@ -149,6 +156,44 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			o.reportMachineStatus()
 		}
 	}
+}
+
+func (o *Orchestrator) reconcileCertificates(ctx context.Context, resources []panel.MachineCertificate) error {
+	if o.certificates == nil {
+		return nil
+	}
+	desired := make([]cert.Resource, 0, len(resources))
+	for _, resource := range resources {
+		if resource.Config == nil {
+			continue
+		}
+		domain := resource.Config.Domain
+		if domain == "" && len(resource.Config.Domains) > 0 {
+			domain = resource.Config.Domains[0]
+		}
+		desired = append(desired, cert.Resource{
+			ID:       resource.ID,
+			Revision: resource.Revision,
+			Config: config.CertConfig{
+				CertMode:    resource.Config.CertMode,
+				Domain:      domain,
+				Domains:     append([]string(nil), resource.Config.Domains...),
+				AutoTLS:     resource.Config.AutoTLS,
+				AutoRenew:   resource.Config.AutoRenew,
+				Revision:    resource.Revision,
+				Email:       resource.Config.Email,
+				DNSProvider: resource.Config.DNSProvider,
+				DNSEnv:      resource.Config.DNSEnv,
+				HTTPPort:    resource.Config.HTTPPort,
+				CertFile:    resource.Config.CertFile,
+				KeyFile:     resource.Config.KeyFile,
+				CertContent: resource.Config.CertContent,
+				KeyContent:  resource.Config.KeyContent,
+				CertDir:     o.sharedCertificateDir(resource.ID),
+			},
+		})
+	}
+	return o.certificates.Reconcile(ctx, desired)
 }
 
 // ─── Node lifecycle ──────────────────────────────────────────────────────
@@ -209,7 +254,7 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 	}
 
 	cp := controlplane.NewMachinePanelControlPlane(perNodeClient, nodeCfg.Kernel, push, registerFn)
-	svc := service.NewWithControlPlane(nodeCfg, cp)
+	svc := service.NewWithControlPlaneAndCertificateStore(nodeCfg, cp, o.certificates)
 
 	nlog.Core().Info(fmt.Sprintf("machine: starting node %d (%s/%s)",
 		mn.ID, mn.Type, mn.Name))
@@ -328,10 +373,27 @@ func (o *Orchestrator) rediscover(ctx context.Context) {
 
 	o.setMachineUnavailable(false)
 	o.applyIntervals(nodesResp.BaseConfig)
+	if err := o.reconcileCertificates(ctx, nodesResp.Certificates); err != nil {
+		nlog.Core().Warn("machine certificate reconciliation had resource errors; continuing node discovery", "error", err)
+	}
 	// A prior 401/403 transition tears down the WS. Recreate it after the
 	// first successful discovery; REST polling remains the source of truth.
 	o.tryStartWS(ctx)
 	o.reconcileNodesLocked(ctx, nodesResp.Nodes)
+}
+
+func (o *Orchestrator) sharedCertificateDir(id string) string {
+	if o == nil || o.cfg == nil || o.cfg.Kernel.ConfigDir == "" {
+		return ""
+	}
+	if id == "" || filepath.Base(id) != id {
+		return ""
+	}
+	// The orchestrator owns the machine root (<root>), while each service
+	// receives <root>/node-<id>. Keep the resource directory directly under
+	// the root so both absolute and relative config_dir values resolve to the
+	// same path.
+	return filepath.Join(o.cfg.Kernel.ConfigDir, "certificates", id)
 }
 
 // reconcileNodesLocked makes the local set match the panel snapshot. The
@@ -366,12 +428,29 @@ func (o *Orchestrator) reconcileNodesLocked(ctx context.Context, nodes []panel.M
 func (o *Orchestrator) reportMachineStatus() {
 	o.reportUsage()
 	s := monitor.Collect()
+	certificateStatuses := make([]map[string]interface{}, 0)
+	if o.certificates != nil {
+		for _, status := range o.certificates.Snapshot() {
+			certificateStatuses = append(certificateStatuses, map[string]interface{}{
+				"id":               status.ID,
+				"revision":         status.Revision,
+				"applied_revision": status.AppliedRevision,
+				"ready":            status.Ready,
+				"state":            status.State,
+				"error":            status.Error,
+				"not_before_at":    status.NotBeforeAt,
+				"expires_at":       status.ExpiresAt,
+				"fingerprint":      status.Fingerprint,
+			})
+		}
+	}
 	if err := o.client.ReportMachineStatus(
 		s.CPU,
 		[2]uint64{s.MemTotal, s.MemUsed},
 		[2]uint64{s.SwapTotal, s.SwapUsed},
 		[2]uint64{s.DiskTotal, s.DiskUsed},
 		s.NetInSpeed, s.NetOutSpeed,
+		certificateStatuses,
 	); err != nil {
 		nlog.Core().Warn("machine status report failed", "error", err)
 	}

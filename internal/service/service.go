@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -40,6 +41,8 @@ type Service struct {
 	limiter      *limiter.Limiter
 	speedTracker *limiter.SpeedTracker
 	cert         *cert.Manager
+	certStore    *cert.Store
+	certSub      *cert.Subscription
 
 	lastConfig *model.NodeSpec
 	// desiredConfig is the most recently accepted panel snapshot. It may be
@@ -163,6 +166,14 @@ func NewWithControlPlane(cfg *config.Config, cp controlplane.ControlPlane) *Serv
 	return newService(cfg, cp)
 }
 
+// NewWithControlPlaneAndCertificateStore creates a machine node service that
+// shares server-level certificate managers with its sibling instances.
+func NewWithControlPlaneAndCertificateStore(cfg *config.Config, cp controlplane.ControlPlane, store *cert.Store) *Service {
+	s := newService(cfg, cp)
+	s.certStore = store
+	return s
+}
+
 func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 	certMgr := cert.NewManager(cfg.Cert)
 
@@ -193,6 +204,47 @@ func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 		wsStatusCh:   make(chan controlplane.StatusChange, 4),
 		pullResults:  make(chan pullResult, 1),
 	}
+}
+
+func (s *Service) currentTLSCert() kernel.TLSCert {
+	if s.certSub != nil {
+		return s.certSub.TLSCert()
+	}
+	return s.cert.TLSCert()
+}
+
+func (s *Service) currentCertHasMaterial() bool {
+	if s.certSub != nil {
+		return s.certSub.HasCert()
+	}
+	return s.cert.HasCert()
+}
+
+func (s *Service) certificateRenewalEvents() <-chan struct{} {
+	if s.certSub == nil {
+		return nil
+	}
+	return s.certSub.Events()
+}
+
+func (s *Service) releaseCertificate() {
+	if s.certSub != nil {
+		s.certSub.Release()
+		s.certSub = nil
+	}
+}
+
+func (s *Service) sharedCertificateDir(id string) (string, error) {
+	if s.cfg == nil || s.cfg.Kernel.ConfigDir == "" {
+		return "", fmt.Errorf("kernel config_dir is required for shared certificate storage")
+	}
+	if id == "" || filepath.Base(id) != id {
+		return "", fmt.Errorf("invalid certificate resource id")
+	}
+	// Machine instances normally use <base>/node-<id>. Keep the certificate
+	// store at the machine base so all instances resolve the same resource path:
+	// <base>/certificates/<certificate-id>/.
+	return filepath.Join(filepath.Dir(s.cfg.Kernel.ConfigDir), "certificates", id), nil
 }
 
 // setDesiredConfig records the latest panel snapshot without claiming that it
@@ -454,11 +506,22 @@ func configApplyErrorMessage(code string, reasons ...string) string {
 }
 
 func (s *Service) Run(ctx context.Context) error {
-	// Start cert manager (handles auto-TLS or manual cert verification)
-	if err := s.cert.Start(ctx); err != nil {
-		return fmt.Errorf("cert manager: %w", err)
+	// Machine-mode services obtain certificate material from the shared Store
+	// after the panel snapshot is known. Starting the per-instance manager here
+	// would create a second cert_dir (and could launch one ACME worker per
+	// node), defeating resource sharing. Legacy/standalone services retain the
+	// local manager lifecycle.
+	certStarted := false
+	if s.certStore == nil {
+		if err := s.cert.Start(ctx); err != nil {
+			return fmt.Errorf("cert manager: %w", err)
+		}
+		certStarted = true
 	}
-	defer s.cert.Stop()
+	if certStarted {
+		defer s.cert.Stop()
+	}
+	defer s.releaseCertificate()
 
 	var stopKernelOnce sync.Once
 	stopKernel := func() { stopKernelOnce.Do(s.kernel.Stop) }
@@ -526,6 +589,9 @@ func (s *Service) Run(ctx context.Context) error {
 		case result := <-s.pullResults:
 			s.applyPullResult(ctx, result)
 
+		case <-s.certificateRenewalEvents():
+			s.handleCertificateRenewal(ctx)
+
 		case <-wsDiscoveryTicker.C:
 			s.wsDiscovery(ctx)
 
@@ -585,7 +651,7 @@ func (s *Service) initialSetup(ctx context.Context) error {
 		}
 		return fmt.Errorf("initial config is nil")
 	}
-	if err := validateNodeRuntime(s.cfg, s.kernel.Protocols(), bootstrap.Config, s.cert.TLSCert()); err != nil {
+	if err := validateNodeRuntime(s.cfg, s.kernel.Protocols(), bootstrap.Config, s.currentTLSCert()); err != nil {
 		s.markConfigApplyFailure(bootstrap.Config, err, "failed")
 		return err
 	}
@@ -656,23 +722,69 @@ func (s *Service) applyRemoteOverrides(ctx context.Context, nc *model.NodeSpec) 
 	return false, nil
 }
 
-// applyPanelCert converts a panel CertConfig into the local config format and
-// reconfigures the cert manager. Reports whether cert paths changed.
+// applyNodeCert converts a panel CertConfig into the local config format and
+// reconfigures either the machine-shared resource manager or the legacy
+// per-service manager. Reports whether cert material changed.
 func (s *Service) applyNodeCert(ctx context.Context, newCfg *config.CertConfig) (bool, error) {
 	if newCfg == nil {
 		return false, nil
 	}
 	cfgCopy := *newCfg
-	cfgCopy.CertDir = s.cfg.Cert.CertDir
-
-	changed, err := s.cert.Reconfigure(ctx, cfgCopy)
+	var (
+		changed bool
+		err     error
+	)
+	if s.certStore != nil && s.desiredCertificateID() != "" {
+		certificateID := s.desiredCertificateID()
+		certDir, dirErr := s.sharedCertificateDir(certificateID)
+		if dirErr != nil {
+			return false, dirErr
+		}
+		cfgCopy.CertDir = certDir
+		if s.certSub == nil || s.certSub.ID() != certificateID {
+			// Acquire and fully validate the replacement before releasing the
+			// last-good subscription. A failed switch must leave the current
+			// certificate serving instead of creating a no-cert window.
+			oldSub := s.certSub
+			newSub, acquireErr := s.certStore.Acquire(certificateID, cfgCopy)
+			if acquireErr != nil {
+				return false, acquireErr
+			}
+			changed, err = newSub.Reconfigure(ctx, cfgCopy)
+			if err != nil {
+				newSub.Release()
+				return false, err
+			}
+			s.certSub = newSub
+			if oldSub != nil {
+				oldSub.Release()
+			}
+		} else {
+			changed, err = s.certSub.Reconfigure(ctx, cfgCopy)
+		}
+		if err == nil {
+			// A machine service may have briefly used a legacy per-node
+			// configuration before receiving a resource binding. Once the shared
+			// resource is ready, stop that local manager so it cannot keep an
+			// unrelated ACME worker alive.
+			s.cert.Stop()
+		}
+	} else {
+		cfgCopy.CertDir = s.cfg.Cert.CertDir
+		changed, err = s.cert.Reconfigure(ctx, cfgCopy)
+		if err == nil {
+			// Keep the shared subscription until the legacy manager has
+			// accepted its candidate configuration.
+			s.releaseCertificate()
+		}
+	}
 	if err != nil {
 		nlog.Core().Error("failed to apply runtime cert config", "mode", cfgCopy.CertMode, "error", err)
 		return false, annotateCertificateReconfigureError(&cfgCopy, err)
 	}
 	s.cfg.Cert = cfgCopy
 	if changed {
-		msg := fmt.Sprintf("cert: material updated, has_cert=%v", s.cert.HasCert())
+		msg := fmt.Sprintf("cert: material updated, has_cert=%v", s.currentCertHasMaterial())
 		if s.nodeLog != nil {
 			s.nodeLog.Info(msg)
 		} else {
@@ -680,6 +792,13 @@ func (s *Service) applyNodeCert(ctx context.Context, newCfg *config.CertConfig) 
 		}
 	}
 	return changed, nil
+}
+
+func (s *Service) desiredCertificateID() string {
+	if s.desiredConfig == nil {
+		return ""
+	}
+	return strings.TrimSpace(s.desiredConfig.CertificateID)
 }
 
 // startWSClient starts the push client goroutine if a client is configured.
@@ -861,7 +980,7 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 		if newConfigHash == s.lastConfigHash && applyStatus == "applied" {
 			return
 		}
-		if err := validateNodeRuntime(s.cfg, s.kernel.Protocols(), event.Config, s.cert.TLSCert()); err != nil {
+		if err := validateNodeRuntime(s.cfg, s.kernel.Protocols(), event.Config, s.currentTLSCert()); err != nil {
 			s.markConfigApplyFailure(event.Config, err, "rejected")
 			nlog.Core().Warn("ws config validation failed, ignoring update", "error", err)
 			return
@@ -912,6 +1031,26 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 	}
 }
 
+// handleCertificateRenewal is called only for subscriptions that reference the
+// renewed resource. It reloads this service's kernel without forcing unrelated
+// node instances to restart.
+func (s *Service) handleCertificateRenewal(ctx context.Context) {
+	s.metricsMu.RLock()
+	candidate := s.lastConfig
+	users := append([]model.UserSpec(nil), s.lastUsers...)
+	s.metricsMu.RUnlock()
+	if candidate == nil {
+		return
+	}
+	if err := validateNodeRuntime(s.cfg, s.kernel.Protocols(), candidate, s.currentTLSCert()); err != nil {
+		s.markConfigApplyFailure(candidate, err, "rejected")
+		nlog.Core().Warn("renewed certificate failed runtime validation", "error", err)
+		return
+	}
+	nlog.Core().Info("certificate renewed, reloading bound node instance", "certificate_id", candidate.CertificateID)
+	s.applyConfigCandidate(ctx, candidate, users)
+}
+
 // pullViaAPIAsync fetches config/users from the panel API in a background
 // goroutine and sends the result to pullResults for the main goroutine to apply.
 func (s *Service) pullViaAPIAsync(ctx context.Context) {
@@ -929,7 +1068,7 @@ func (s *Service) pullViaAPIAsync(ctx context.Context) {
 	}
 
 	currentConfigHash := s.lastConfigHash
-	certChanged := s.cert.CertRenewed()
+	certChanged := s.certSub == nil && s.cert.CertRenewed()
 
 	go func() {
 		defer s.pullActive.Store(false)
@@ -987,7 +1126,7 @@ func (s *Service) applyPullResult(ctx context.Context, result pullResult) {
 	}
 
 	if result.config != nil {
-		if err := validateNodeRuntime(s.cfg, s.kernel.Protocols(), result.config, s.cert.TLSCert()); err != nil {
+		if err := validateNodeRuntime(s.cfg, s.kernel.Protocols(), result.config, s.currentTLSCert()); err != nil {
 			s.markConfigApplyFailure(result.config, err, "rejected")
 			nlog.Core().Warn("runtime config validation failed", "error", err)
 			candidate = nil
@@ -1089,7 +1228,7 @@ func (s *Service) startKernel(nc *model.NodeSpec, users []model.UserSpec) bool {
 }
 
 func (s *Service) startKernelErr(nc *model.NodeSpec, users []model.UserSpec) error {
-	if err := s.kernel.Start(nc, users, s.cert.TLSCert()); err != nil {
+	if err := s.kernel.Start(nc, users, s.currentTLSCert()); err != nil {
 		nlog.Core().Error("failed to start kernel", "error", err)
 		return err
 	}
@@ -1131,7 +1270,7 @@ func (s *Service) applyConfigCandidate(ctx context.Context, candidate *model.Nod
 	}
 
 	if s.kernel.IsRunning() {
-		if err := s.kernel.Reload(candidate, users, s.cert.TLSCert()); err != nil {
+		if err := s.kernel.Reload(candidate, users, s.currentTLSCert()); err != nil {
 			s.markConfigApplyFailure(candidate, err, "failed")
 			nlog.Core().Warn("reload failed; last-good config retained", "error", err)
 			return false
@@ -1688,6 +1827,7 @@ func hasUsableTLSConfig(spec *model.NodeSpec, tls kernel.TLSCert) bool {
 		return false
 	}
 	mode := strings.ToLower(strings.TrimSpace(spec.CertConfig.CertMode))
+	hasDomain := strings.TrimSpace(spec.CertConfig.Domain) != "" || len(spec.CertConfig.Domains) > 0
 	switch mode {
 	case "self":
 		return true
@@ -1696,11 +1836,11 @@ func hasUsableTLSConfig(spec *model.NodeSpec, tls kernel.TLSCert) bool {
 	case "file":
 		return strings.TrimSpace(spec.CertConfig.CertFile) != "" && strings.TrimSpace(spec.CertConfig.KeyFile) != ""
 	case "http":
-		return strings.TrimSpace(spec.CertConfig.Domain) != ""
+		return hasDomain
 	case "dns":
-		return strings.TrimSpace(spec.CertConfig.Domain) != "" && strings.TrimSpace(spec.CertConfig.DNSProvider) != ""
+		return hasDomain && strings.TrimSpace(spec.CertConfig.DNSProvider) != ""
 	default:
-		return false
+		return spec.CertConfig.AutoTLS && hasDomain
 	}
 }
 

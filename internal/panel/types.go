@@ -71,8 +71,18 @@ type MachineNode struct {
 
 // MachineNodesResponse is the response from GET /api/v2/server/machine/nodes.
 type MachineNodesResponse struct {
-	Nodes      []MachineNode     `json:"nodes"`
-	BaseConfig MachineBaseConfig `json:"base_config"`
+	Nodes        []MachineNode        `json:"nodes"`
+	Certificates []MachineCertificate `json:"certificates,omitempty"`
+	BaseConfig   MachineBaseConfig    `json:"base_config"`
+}
+
+// MachineCertificate is a machine-authenticated desired resource projection.
+// It is intentionally absent from Admin/MCP responses; only the machine
+// endpoint receives the decrypted runtime material.
+type MachineCertificate struct {
+	ID       string      `json:"id"`
+	Revision int64       `json:"revision"`
+	Config   *CertConfig `json:"cert_config"`
 }
 
 // MachineBaseConfig holds polling intervals for machine mode.
@@ -106,9 +116,11 @@ type NodeConfig struct {
 	FallbackSite     *FallbackSite     `json:"fallback_site,omitempty"`
 
 	// Certificate settings (Xboard extension)
-	CertConfig *CertConfig `json:"cert_config,omitempty"`
-	AutoTLS    bool        `json:"auto_tls,omitempty"` // Deprecated: use CertConfig
-	Domain     string      `json:"domain,omitempty"`   // Deprecated: use CertConfig
+	CertificateID      string      `json:"certificate_id,omitempty"`
+	CertificateRefMode string      `json:"certificate_ref_mode,omitempty"`
+	CertConfig         *CertConfig `json:"cert_config,omitempty"`
+	AutoTLS            bool        `json:"auto_tls,omitempty"` // Deprecated: use CertConfig
+	Domain             string      `json:"domain,omitempty"`   // Deprecated: use CertConfig
 
 	// Shadowsocks
 	Cipher    string `json:"cipher,omitempty"`
@@ -225,8 +237,12 @@ type BrutalConfig struct {
 // The panel may send the mode field as either "cert_mode" or "mode";
 // a custom UnmarshalJSON handles both.
 type CertConfig struct {
-	CertMode    string            `json:"cert_mode"`    // none, dns, http, self, file, content
-	Domain      string            `json:"domain"`       // Certificate domain
+	CertMode    string            `json:"cert_mode"` // none, dns, http, self, file, content
+	Domain      string            `json:"domain"`    // Certificate domain
+	Domains     []string          `json:"domains,omitempty"`
+	AutoTLS     bool              `json:"auto_tls,omitempty"`
+	AutoRenew   bool              `json:"auto_renew,omitempty"`
+	Revision    int64             `json:"revision,omitempty"`
 	Email       string            `json:"email"`        // ACME email
 	DNSProvider string            `json:"dns_provider"` // dns mode: cloudflare, alidns, etc.
 	DNSEnv      map[string]string `json:"dns_env"`      // Provider-specific API keys/tokens

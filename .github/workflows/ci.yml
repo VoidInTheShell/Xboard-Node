@@ -41,6 +41,14 @@ jobs:
       - name: Run tests
         run: make test
 
+      - name: Validate standalone Admin updater reference
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep --fixed-strings 'DEFAULT_UPDATER_DOWNLOAD_BASE="https://github.com/VoidInTheShell/xboard-admin/releases"' install.sh > /dev/null
+          grep --fixed-strings 'xboard-updater-linux-${ARCH}' install.sh > /dev/null
+          ! grep --fixed-strings 'Host updater included in xbctl' install.sh > /dev/null
+
       - name: Build Hugo cover site
         shell: bash
         run: |

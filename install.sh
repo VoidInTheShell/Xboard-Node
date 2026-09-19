@@ -15,6 +15,12 @@ INSTALL_META="${INSTALL_ROOT}/install-meta.json"
 CONFIG_FILE="${INSTALL_ROOT}/config.yml"
 CREDENTIALS_FILE="${INSTALL_ROOT}/credentials.env"
 BINARY_PATH="/usr/local/bin/xboard-node"
+UPDATER_BINARY_PATH="/usr/local/libexec/xboard-updater"
+UPDATER_CONFIG_DIR="/etc/xboard-updater"
+UPDATER_CONFIG_PATH="${UPDATER_CONFIG_DIR}/config.json"
+UPDATER_TOKEN_PATH="${UPDATER_CONFIG_DIR}/token"
+UPDATER_STATE_DIR="/var/lib/xboard-updater"
+UPDATER_SERVICE_PATH="/etc/systemd/system/xboard-updater.service"
 SERVICE_NAME="xboard-node.service"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
 CLI_PATH="/usr/local/bin/xbctl"
@@ -28,28 +34,41 @@ DEFAULT_RELEASE_VERSION="latest"
 DEFAULT_LOG_LEVEL="info"
 DEFAULT_KERNEL_LOG_LEVEL="warn"
 DEFAULT_DOWNLOAD_BASE="https://github.com/VoidInTheShell/Xboard-Node/releases"
+DEFAULT_UPDATER_DOWNLOAD_BASE="https://github.com/VoidInTheShell/xboard-admin/releases"
 
 ACTION="${DEFAULT_ACTION}"
 MODE=""
 PANEL_URL=""
 TOKEN=""
+ENROLLMENT_TOKEN=""
+UPDATER_EXECUTOR_ID=""
+UPDATER_EXECUTOR_SECRET=""
 NODE_ID=""
 NODE_TYPE=""
 MACHINE_ID=""
 KERNEL_TYPE="${DEFAULT_KERNEL}"
 RELEASE_VERSION="${DEFAULT_RELEASE_VERSION}"
+UPDATER_VERSION="${UPDATER_VERSION:-}"
+INSTALLATION_METHOD="${INSTALLATION_METHOD:-systemd}"
 HEALTH_PORT="${DEFAULT_HEALTH_PORT}"
 HEALTH_ENABLED=1
 RUNTIME_GOMEMLIMIT=""
 RUNTIME_GOGC=""
 BINARY_SOURCE=""
 CLI_BINARY_SOURCE=""
+UPDATER_BINARY_SOURCE="${UPDATER_BINARY_SOURCE:-}"
 FORCE_RECONFIGURE=0
 PURGE=0
 YES=0
 ARCH=""
 OS=""
 DOWNLOAD_URL=""
+UPDATER_DOWNLOAD_URL=""
+UPDATER_IMAGE=""
+NODE_CONTAINER_NAME=""
+UPDATER_CONTAINER_NAME=""
+COMPOSE_PROJECT=""
+COMPOSE_FILE=""
 CURRENT_STATE="fresh"
 TMP_DIR=""
 BACKUP_PATH=""
@@ -120,11 +139,46 @@ rollback_install() {
         else
             rm -f "$CLI_PATH"
         fi
+        if [ -f "$BACKUP_PATH/xboard-updater" ]; then
+            install -m 755 "$BACKUP_PATH/xboard-updater" "$UPDATER_BINARY_PATH"
+        elif [ -n "$UPDATER_BINARY_SOURCE" ] || [ -n "$UPDATER_VERSION" ]; then
+            rm -f "$UPDATER_BINARY_PATH"
+        fi
+        if [ -f "$BACKUP_PATH/updater-config.json" ]; then
+            install -d -m 700 "$UPDATER_CONFIG_DIR"
+            install -m 600 "$BACKUP_PATH/updater-config.json" "$UPDATER_CONFIG_PATH"
+        elif [ -n "$UPDATER_EXECUTOR_SECRET" ] || [ -f "$UPDATER_CONFIG_PATH" ]; then
+            rm -f "$UPDATER_CONFIG_PATH"
+        fi
+        if [ -f "$BACKUP_PATH/updater-token" ]; then
+            install -d -m 700 "$UPDATER_CONFIG_DIR"
+            install -m 600 "$BACKUP_PATH/updater-token" "$UPDATER_TOKEN_PATH"
+        elif [ -n "$UPDATER_EXECUTOR_SECRET" ] || [ -f "$UPDATER_TOKEN_PATH" ]; then
+            rm -f "$UPDATER_TOKEN_PATH"
+        fi
+        if [ -f "$BACKUP_PATH/xboard-updater.service" ]; then
+            install -m 644 "$BACKUP_PATH/xboard-updater.service" "$UPDATER_SERVICE_PATH"
+        elif [ -n "$UPDATER_EXECUTOR_SECRET" ]; then
+            rm -f "$UPDATER_SERVICE_PATH"
+        fi
+        if [ -f "$BACKUP_PATH/compose.yaml" ]; then
+            install -m 600 "$BACKUP_PATH/compose.yaml" "$COMPOSE_FILE"
+        elif [ "$INSTALLATION_METHOD" = "compose" ]; then
+            rm -f "$COMPOSE_FILE"
+        fi
         if [ -f "$BACKUP_PATH/${SERVICE_NAME}" ]; then
             install -m 644 "$BACKUP_PATH/${SERVICE_NAME}" "$SERVICE_PATH"
         else
             rm -f "$SERVICE_PATH"
         fi
+    fi
+    if [ "$INSTALLATION_METHOD" != "systemd" ]; then
+        docker rm -f "$UPDATER_CONTAINER_NAME" "$NODE_CONTAINER_NAME" >/dev/null 2>&1 || true
+        if [ -f "$COMPOSE_FILE" ] && [ "$INSTALLATION_METHOD" = "compose" ]; then
+            start_container_deployment || true
+        fi
+        log_warn "Container deployment rollback complete; verify the restored health state"
+        return 0
     fi
     load_health_port_from_config "$CONFIG_FILE"
     systemctl daemon-reload || true
@@ -180,15 +234,19 @@ usage() {
 
   REQUIRED FOR MACHINE MODE:
     --panel, -a       Panel URL
-    --token, -t       Machine token
+    --token, -t       Existing machine token (legacy/manual mode)
     --machine-id      Machine ID
 
   OPTIONAL:
     --node-type, -T     Explicit node type for node mode
     --kernel, -k        singbox or xray (default: singbox)
     --version           Release version or latest (default: latest)
+    --enrollment-token  Short-lived, one-time machine enrollment token
+    --updater-version   Exact Admin Release version for the standalone updater
+    --installation-method systemd, docker or compose (enrollment mode)
     --binary            Use a local xboard-node binary path instead of downloading
     --xbctl-binary      Use a local xbctl binary path instead of downloading
+    --updater-binary    Use a local xboard-updater binary path instead of downloading
     --health-port       Local health port (default: 65530, use 0 to disable)
     --gomemlimit        Runtime GOMEMLIMIT value, e.g. 256MiB
     --gogc              Runtime GOGC value, e.g. 50
@@ -225,6 +283,10 @@ parse_args() {
                 TOKEN="$2"
                 shift 2
                 ;;
+            --enrollment-token)
+                ENROLLMENT_TOKEN="$2"
+                shift 2
+                ;;
             --node-id|-n)
                 NODE_ID="$2"
                 shift 2
@@ -245,12 +307,24 @@ parse_args() {
                 RELEASE_VERSION="$2"
                 shift 2
                 ;;
+            --updater-version)
+                UPDATER_VERSION="$2"
+                shift 2
+                ;;
+            --installation-method)
+                INSTALLATION_METHOD="$2"
+                shift 2
+                ;;
             --binary)
                 BINARY_SOURCE="$2"
                 shift 2
                 ;;
             --xbctl-binary)
                 CLI_BINARY_SOURCE="$2"
+                shift 2
+                ;;
+            --updater-binary)
+                UPDATER_BINARY_SOURCE="$2"
                 shift 2
                 ;;
             --health-port)
@@ -395,7 +469,7 @@ install_dependencies() {
 }
 
 ensure_dirs() {
-    mkdir -p "$INSTALL_ROOT" "$BACKUP_DIR"
+    mkdir -p "$INSTALL_ROOT" "$BACKUP_DIR" "${INSTALL_ROOT}/certs" "${INSTALL_ROOT}/state" "${INSTALL_ROOT}/instances"
     chmod 700 "$INSTALL_ROOT"
 }
 
@@ -408,13 +482,36 @@ validate_positive_int() {
     fi
 }
 
+validate_https_panel_url() {
+    local value="$1"
+    local label="${2:-Panel URL}"
+    case "$value" in
+        *\"*|*\'*|*[[:space:]]*)
+            log_error "${label} contains unsupported characters"
+            exit 1
+            ;;
+    esac
+    case "$value" in
+        https://?*) ;;
+        *)
+            log_error "${label} must use HTTPS"
+            exit 1
+            ;;
+    esac
+}
+
 validate_install_request() {
     if [ -z "$PANEL_URL" ]; then
         log_error "Panel URL is required"
         exit 1
     fi
-    if [ -z "$TOKEN" ]; then
+    if [ -z "$TOKEN" ] && { [ "$MODE" != "machine" ] || [ -z "$ENROLLMENT_TOKEN" ]; }; then
         log_error "Token is required"
+        exit 1
+    fi
+    validate_https_panel_url "$PANEL_URL"
+    if [ -n "$UPDATER_VERSION" ] && ! [[ "$UPDATER_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-dev\.[1-9][0-9]*\.[1-9][0-9]*)?$ ]]; then
+        log_error "updater-version must be an exact vX.Y.Z or vX.Y.Z-dev.RUN.ATTEMPT release"
         exit 1
     fi
     if ! [[ "$HEALTH_PORT" =~ ^[0-9]+$ ]]; then
@@ -437,8 +534,220 @@ validate_install_request() {
             ;;
         machine)
             validate_positive_int "Machine ID" "$MACHINE_ID"
+            if [ -n "$ENROLLMENT_TOKEN" ]; then
+                if [ -z "$UPDATER_VERSION" ]; then
+                    log_error "Enrollment mode requires an exact updater-version"
+                    exit 1
+                fi
+                case "$INSTALLATION_METHOD" in
+                    systemd|docker|compose) ;;
+                    *)
+                        log_error "installation-method must be systemd, docker or compose"
+                        exit 1
+                        ;;
+                esac
+            fi
             ;;
     esac
+    if [ "$MODE" != "machine" ] && [ "$INSTALLATION_METHOD" != "systemd" ]; then
+        log_error "Docker and Compose installation methods require machine mode enrollment"
+        exit 1
+    fi
+    case "$INSTALLATION_METHOD" in
+        systemd|docker|compose) ;;
+        *)
+            log_error "installation-method must be systemd, docker or compose"
+            exit 1
+            ;;
+    esac
+    if [ "$MODE" = "machine" ]; then
+        NODE_CONTAINER_NAME="xboard-node-machine-${MACHINE_ID}"
+        UPDATER_CONTAINER_NAME="xboard-updater-machine-${MACHINE_ID}"
+        COMPOSE_PROJECT="xboard-node-machine-${MACHINE_ID}"
+        COMPOSE_FILE="${INSTALL_ROOT}/compose.yaml"
+    fi
+}
+
+ensure_docker() {
+    if ! command -v docker >/dev/null 2>&1; then
+        log_error "Docker is required for ${INSTALLATION_METHOD} installation"
+        exit 1
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        log_error "Docker daemon is not available"
+        exit 1
+    fi
+}
+
+json_read_string_at() {
+    local json="$1" pos="$2" length="${#1}" ch escape hex decoded out=""
+    if [ "${json:pos:1}" != '"' ]; then
+        return 1
+    fi
+    pos=$((pos + 1))
+    while [ "$pos" -lt "$length" ]; do
+        ch="${json:pos:1}"
+        pos=$((pos + 1))
+        if [ "$ch" = '"' ]; then
+            JSON_STRING_VALUE="$out"
+            JSON_STRING_NEXT="$pos"
+            return 0
+        fi
+        if [ "$ch" != '\' ]; then
+            out="${out}${ch}"
+            continue
+        fi
+        if [ "$pos" -ge "$length" ]; then
+            return 1
+        fi
+        escape="${json:pos:1}"
+        pos=$((pos + 1))
+        if [ "$escape" = '"' ]; then
+            out="${out}"'"'
+        elif [ "$escape" = '\' ]; then
+            out="${out}"'\'
+        elif [ "$escape" = '/' ]; then
+            out="${out}/"
+        elif [ "$escape" = 'b' ]; then
+            out="${out}"$'\b'
+        elif [ "$escape" = 'f' ]; then
+            out="${out}"$'\f'
+        elif [ "$escape" = 'n' ]; then
+            out="${out}"$'\n'
+        elif [ "$escape" = 'r' ]; then
+            out="${out}"$'\r'
+        elif [ "$escape" = 't' ]; then
+            out="${out}"$'\t'
+        elif [ "$escape" = 'u' ]; then
+            hex="${json:pos:4}"
+            if ! [[ "$hex" =~ ^[0-9A-Fa-f]{4}$ ]]; then
+                return 1
+            fi
+            printf -v decoded '%b' "\\u${hex}"
+            out="${out}${decoded}"
+            pos=$((pos + 4))
+        else
+            return 1
+        fi
+    done
+    return 1
+}
+
+json_field() {
+    local key="$1" json
+    json=$(cat)
+    if command -v jq >/dev/null 2>&1; then
+        printf '%s' "$json" | jq -er --arg key "$key" 'first(.. | objects | .[$key]? | select(type == "string" or type == "number" or type == "boolean") | if type == "string" then . else tostring end)'
+        return
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        printf '%s' "$json" | python3 -c '
+import json, sys
+key = sys.argv[1]
+value = json.load(sys.stdin)
+def find(item):
+    if isinstance(item, dict):
+        if key in item and isinstance(item[key], (str, int, float, bool)):
+            print(item[key])
+            return True
+        return any(find(child) for child in item.values())
+    if isinstance(item, list):
+        return any(find(child) for child in item)
+    return False
+if not find(value):
+    raise SystemExit(1)
+' "$key"
+        return
+    fi
+
+    local pos=0 length="${#json}" ch token next probe value start
+    while [ "$pos" -lt "$length" ]; do
+        ch="${json:pos:1}"
+        if [ "$ch" != '"' ]; then
+            pos=$((pos + 1))
+            continue
+        fi
+        if ! json_read_string_at "$json" "$pos"; then
+            return 1
+        fi
+        token="$JSON_STRING_VALUE"
+        next="$JSON_STRING_NEXT"
+        probe="$next"
+        while [ "$probe" -lt "$length" ]; do
+            case "${json:probe:1}" in
+                ' '|$'\t'|$'\r'|$'\n') probe=$((probe + 1)) ;;
+                *) break ;;
+            esac
+        done
+        if [ "$token" = "$key" ] && [ "${json:probe:1}" = ':' ]; then
+            probe=$((probe + 1))
+            while [ "$probe" -lt "$length" ]; do
+                case "${json:probe:1}" in
+                    ' '|$'\t'|$'\r'|$'\n') probe=$((probe + 1)) ;;
+                    *) break ;;
+                esac
+            done
+            if [ "${json:probe:1}" = '"' ]; then
+                if json_read_string_at "$json" "$probe"; then
+                    printf '%s\n' "$JSON_STRING_VALUE"
+                    return 0
+                fi
+                return 1
+            fi
+            start="$probe"
+            while [ "$probe" -lt "$length" ]; do
+                ch="${json:probe:1}"
+                case "$ch" in
+                    ','|'}'|']') break ;;
+                esac
+                probe=$((probe + 1))
+            done
+            value="${json:start:probe-start}"
+            value="${value#"${value%%[![:space:]]*}"}"
+            value="${value%"${value##*[![:space:]]}"}"
+            [ -n "$value" ] || return 1
+            printf '%s\n' "$value"
+            return 0
+        fi
+        pos="$next"
+    done
+    return 1
+}
+
+json_string_field() {
+    json_field "$1"
+}
+
+enroll_machine() {
+    if [ "$MODE" != "machine" ] || [ -z "$ENROLLMENT_TOKEN" ]; then
+        return 0
+    fi
+    log_step "Exchanging one-time machine enrollment"
+    local payload response machine_id panel_url machine_token executor_id executor_secret
+    payload=$(printf '{"enrollment_token":"%s","architecture":"linux/%s","installation_method":"%s","node_version":"%s","updater_version":"%s","node_instance_id":"machine-%s"}' \
+        "$ENROLLMENT_TOKEN" "$ARCH" "$INSTALLATION_METHOD" "$RELEASE_VERSION" "$UPDATER_VERSION" "$MACHINE_ID")
+    # This exchange consumes a one-time token. Never retry it automatically:
+    # a transport timeout must be diagnosed and a fresh token issued instead.
+    response=$(curl -fsSL \
+        -H 'Content-Type: application/json' -H 'Accept: application/json' \
+        --data "$payload" "${PANEL_URL%/}/api/v2/server/machine/enroll") || {
+        log_error "Machine enrollment failed; generate a new installation command"
+        exit 1
+    }
+    machine_id=$(printf '%s' "$response" | json_field machine_id) || machine_id=""
+    panel_url=$(printf '%s' "$response" | json_string_field panel_url) || panel_url=""
+    machine_token=$(printf '%s' "$response" | json_string_field machine_token) || machine_token=""
+    executor_id=$(printf '%s' "$response" | json_string_field executor_id) || executor_id=""
+    executor_secret=$(printf '%s' "$response" | json_string_field executor_secret) || executor_secret=""
+    if [ "$machine_id" != "$MACHINE_ID" ] || [ -z "$panel_url" ] || [ -z "$machine_token" ] || [ -z "$executor_id" ] || [ -z "$executor_secret" ]; then
+        log_error "Machine enrollment returned an invalid registration"
+        exit 1
+    fi
+    validate_https_panel_url "$panel_url" "Machine enrollment panel URL"
+    PANEL_URL="$panel_url"
+    TOKEN="$machine_token"
+    UPDATER_EXECUTOR_ID="$executor_id"
+    UPDATER_EXECUTOR_SECRET="$executor_secret"
 }
 
 detect_current_state() {
@@ -508,7 +817,18 @@ resolve_download_url() {
     fi
 }
 
+resolve_updater_download_url() {
+    if [ -z "$UPDATER_VERSION" ]; then
+        UPDATER_DOWNLOAD_URL=""
+        return
+    fi
+    UPDATER_DOWNLOAD_URL="${DEFAULT_UPDATER_DOWNLOAD_BASE}/download/${UPDATER_VERSION}/xboard-updater-linux-${ARCH}"
+}
+
 stage_binary() {
+    if [ "$INSTALLATION_METHOD" != "systemd" ]; then
+        return 0
+    fi
     local staged="$TMP_DIR/xboard-node"
     local local_src
     local_src=$(select_binary_source)
@@ -578,6 +898,56 @@ stage_xbctl() {
     fi
 }
 
+stage_updater() {
+    local staged="$TMP_DIR/xboard-updater"
+    local local_src="$UPDATER_BINARY_SOURCE"
+    if [ "$INSTALLATION_METHOD" != "systemd" ]; then
+        if [ -n "$local_src" ]; then
+            log_error "--updater-binary is only supported for systemd installation"
+            exit 1
+        fi
+        if [ -z "$UPDATER_VERSION" ]; then
+            log_error "Docker and Compose installation require an exact updater-version"
+            exit 1
+        fi
+        UPDATER_IMAGE="ghcr.io/voidintheshell/xboard-admin-updater:${UPDATER_VERSION}"
+        log_step "Pulling standalone updater image: ${UPDATER_IMAGE}"
+        docker pull "$UPDATER_IMAGE" >/dev/null
+        return 0
+    fi
+    if [ -z "$local_src" ] && [ -z "$UPDATER_VERSION" ]; then
+        return 0
+    fi
+    if [ -n "$local_src" ]; then
+        if [ ! -f "$local_src" ]; then
+            log_error "updater binary source not found: $local_src"
+            exit 1
+        fi
+        log_step "Using local xboard-updater binary: ${local_src}"
+        cp "$local_src" "$staged"
+    else
+        resolve_updater_download_url
+        log_step "Downloading standalone updater: ${UPDATER_DOWNLOAD_URL}"
+        if ! curl -fsSL "$UPDATER_DOWNLOAD_URL" -o "$staged"; then
+            log_error "Failed to download standalone updater from ${UPDATER_DOWNLOAD_URL}"
+            exit 1
+        fi
+    fi
+    chmod +x "$staged"
+    if ! "$staged" version >/dev/null 2>&1; then
+        log_error "Standalone updater failed version check"
+        exit 1
+    fi
+    if [ -n "$UPDATER_VERSION" ]; then
+        local reported
+        reported=$("$staged" version | awk '{print $1}')
+        if [ "$reported" != "$UPDATER_VERSION" ]; then
+            log_error "Standalone updater does not report the selected Admin Release"
+            exit 1
+        fi
+    fi
+}
+
 render_config() {
     local init_args=(
         config init
@@ -623,6 +993,99 @@ render_config() {
     chmod 600 "$TMP_DIR/credentials.env"
 }
 
+render_updater_config() {
+    if [ "$MODE" != "machine" ] || [ -z "$UPDATER_EXECUTOR_SECRET" ]; then
+        return 0
+    fi
+    if [ -z "${INSTANCE_ID:-}" ] || ! [[ "$INSTANCE_ID" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+        log_error "xbctl returned an invalid machine instance id"
+        exit 1
+    fi
+    mkdir -p "$UPDATER_STATE_DIR"
+    chmod 700 "$UPDATER_STATE_DIR"
+    mkdir -p "$TMP_DIR/updater"
+    printf '%s\n' "$UPDATER_EXECUTOR_SECRET" > "$TMP_DIR/updater/token"
+    chmod 600 "$TMP_DIR/updater/token"
+    local target_json
+    case "$INSTALLATION_METHOD" in
+        systemd)
+            target_json=$(printf '      "id": "%s",\n      "name": "xboard-node-machine-%s",\n      "component": "xboard-node",\n      "method": "systemd",\n      "binary": "%s",\n      "service": "%s",\n      "health_url": "http://127.0.0.1:%s/healthz"' \
+                "$INSTANCE_ID" "$MACHINE_ID" "$BINARY_PATH" "$SERVICE_NAME" "$HEALTH_PORT")
+            ;;
+        docker)
+            target_json=$(printf '      "id": "%s",\n      "name": "xboard-node-machine-%s",\n      "component": "xboard-node",\n      "method": "docker",\n      "container": "%s",\n      "health_url": "http://127.0.0.1:%s/healthz"' \
+                "$INSTANCE_ID" "$MACHINE_ID" "$NODE_CONTAINER_NAME" "$HEALTH_PORT")
+            ;;
+        compose)
+            target_json=$(printf '      "id": "%s",\n      "name": "xboard-node-machine-%s",\n      "component": "xboard-node",\n      "method": "compose",\n      "compose_file": "%s",\n      "compose_project": "%s",\n      "compose_service": "xboard-node",\n      "health_url": "http://127.0.0.1:%s/healthz"' \
+                "$INSTANCE_ID" "$MACHINE_ID" "$COMPOSE_FILE" "$COMPOSE_PROJECT" "$HEALTH_PORT")
+            ;;
+    esac
+    cat >"$TMP_DIR/updater/config.json" <<EOF_UPDATER
+{
+  "panel_url": "${PANEL_URL}",
+  "token_file": "${UPDATER_TOKEN_PATH}",
+  "state_dir": "${UPDATER_STATE_DIR}",
+  "executor_id": "${UPDATER_EXECUTOR_ID}",
+  "installation_method": "${INSTALLATION_METHOD}",
+  "handoff_path": "${UPDATER_STATE_DIR}/handoff.json",
+  "targets": [
+    {
+${target_json}
+    }
+  ]
+}
+EOF_UPDATER
+    chmod 600 "$TMP_DIR/updater/config.json"
+}
+
+render_compose_file() {
+    if [ "$INSTALLATION_METHOD" != "compose" ]; then
+        return 0
+    fi
+    mkdir -p "$TMP_DIR/deployment"
+    cat >"$TMP_DIR/deployment/compose.yaml" <<EOF_COMPOSE
+services:
+  xboard-node:
+    image: ghcr.io/voidintheshell/xboard-node:${RELEASE_VERSION}
+    container_name: ${NODE_CONTAINER_NAME}
+    restart: unless-stopped
+    init: true
+    network_mode: host
+    env_file:
+      - ${CREDENTIALS_FILE}
+    volumes:
+      - ${CONFIG_FILE}:/etc/xboard-node/config.yml:ro
+      - ${INSTALL_ROOT}/certs:/etc/xboard-node/certs
+      - ${INSTALL_ROOT}/state:/etc/xboard-node/state
+      - ${INSTALL_ROOT}/instances:/etc/xboard-node/instances
+
+  xboard-updater:
+    image: ${UPDATER_IMAGE}
+    container_name: ${UPDATER_CONTAINER_NAME}
+    restart: unless-stopped
+    depends_on:
+      xboard-node:
+        condition: service_started
+    network_mode: host
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${INSTALL_ROOT}:${INSTALL_ROOT}:ro
+      - ${UPDATER_CONFIG_PATH}:${UPDATER_CONFIG_PATH}:ro
+      - ${UPDATER_TOKEN_PATH}:${UPDATER_TOKEN_PATH}:ro
+      - ${UPDATER_STATE_DIR}:${UPDATER_STATE_DIR}
+    command: ["updater", "run", "--config", "${UPDATER_CONFIG_PATH}"]
+EOF_COMPOSE
+    chmod 600 "$TMP_DIR/deployment/compose.yaml"
+}
+
 render_service() {
     cat >"$TMP_DIR/${SERVICE_NAME}" <<EOF_UNIT
 [Unit]
@@ -657,6 +1120,9 @@ backup_existing_state() {
     if [ -x "$CLI_PATH" ]; then
         cp "$CLI_PATH" "$BACKUP_PATH/xbctl"
     fi
+    if [ -x "$UPDATER_BINARY_PATH" ]; then
+        cp "$UPDATER_BINARY_PATH" "$BACKUP_PATH/xboard-updater"
+    fi
     if [ -f "$CONFIG_FILE" ]; then
         cp "$CONFIG_FILE" "$BACKUP_PATH/config.yml"
     fi
@@ -665,6 +1131,18 @@ backup_existing_state() {
     fi
     if [ -f "$INSTALL_META" ]; then
         cp "$INSTALL_META" "$BACKUP_PATH/install-meta.json"
+    fi
+    if [ -f "$UPDATER_CONFIG_PATH" ]; then
+        cp "$UPDATER_CONFIG_PATH" "$BACKUP_PATH/updater-config.json"
+    fi
+    if [ -f "$UPDATER_TOKEN_PATH" ]; then
+        cp "$UPDATER_TOKEN_PATH" "$BACKUP_PATH/updater-token"
+    fi
+    if [ -f "$UPDATER_SERVICE_PATH" ]; then
+        cp "$UPDATER_SERVICE_PATH" "$BACKUP_PATH/xboard-updater.service"
+    fi
+    if [ -f "$COMPOSE_FILE" ]; then
+        cp "$COMPOSE_FILE" "$BACKUP_PATH/compose.yaml"
     fi
     if [ -f "$SERVICE_PATH" ]; then
         cp "$SERVICE_PATH" "$BACKUP_PATH/${SERVICE_NAME}"
@@ -675,6 +1153,14 @@ backup_existing_state() {
 }
 
 stop_existing_service() {
+    if [ "$INSTALLATION_METHOD" = "compose" ] && [ -f "$COMPOSE_FILE" ]; then
+        docker compose --project-name "$COMPOSE_PROJECT" --file "$COMPOSE_FILE" down >/dev/null 2>&1 || true
+        return
+    fi
+    if [ "$INSTALLATION_METHOD" = "docker" ]; then
+        docker rm -f "$UPDATER_CONTAINER_NAME" "$NODE_CONTAINER_NAME" >/dev/null 2>&1 || true
+        return
+    fi
     if [ -f "$SERVICE_PATH" ] || systemctl is-active "$SERVICE_NAME" >/dev/null 2>&1; then
         systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
     fi
@@ -682,7 +1168,9 @@ stop_existing_service() {
 
 install_staged_files() {
     stop_existing_service
-    install -m 755 "$TMP_DIR/xboard-node" "$BINARY_PATH"
+    if [ "$INSTALLATION_METHOD" = "systemd" ]; then
+        install -m 755 "$TMP_DIR/xboard-node" "$BINARY_PATH"
+    fi
     install -m 600 "$TMP_DIR/config.yml" "$CONFIG_FILE"
     install -m 600 "$TMP_DIR/credentials.env" "$CREDENTIALS_FILE"
     install -m 644 "$TMP_DIR/install-meta.json" "$INSTALL_META"
@@ -691,12 +1179,61 @@ install_staged_files() {
     fi
     install -m 755 "$TMP_DIR/xbctl" "$CLI_PATH"
     ln -sf "$CLI_PATH" /usr/bin/xbctl 2>/dev/null || true
-    install -m 644 "$TMP_DIR/${SERVICE_NAME}" "$SERVICE_PATH"
-    systemctl daemon-reload
-    systemctl enable "$SERVICE_NAME" > /dev/null 2>&1
+    if [ -f "$TMP_DIR/xboard-updater" ]; then
+        install -d -m 755 "$(dirname "$UPDATER_BINARY_PATH")"
+        install -m 755 "$TMP_DIR/xboard-updater" "$UPDATER_BINARY_PATH"
+    fi
+    if [ -f "$TMP_DIR/updater/config.json" ]; then
+        install -d -m 700 "$UPDATER_CONFIG_DIR"
+        install -m 600 "$TMP_DIR/updater/config.json" "$UPDATER_CONFIG_PATH"
+        install -m 600 "$TMP_DIR/updater/token" "$UPDATER_TOKEN_PATH"
+    fi
+    if [ -f "$TMP_DIR/deployment/compose.yaml" ]; then
+        install -m 600 "$TMP_DIR/deployment/compose.yaml" "$COMPOSE_FILE"
+    fi
+    if [ "$INSTALLATION_METHOD" = "systemd" ]; then
+        install -m 644 "$TMP_DIR/${SERVICE_NAME}" "$SERVICE_PATH"
+        systemctl daemon-reload
+        systemctl enable "$SERVICE_NAME" > /dev/null 2>&1
+    fi
+}
+
+start_container_deployment() {
+    if [ "$INSTALLATION_METHOD" = "docker" ]; then
+        docker rm -f "$UPDATER_CONTAINER_NAME" "$NODE_CONTAINER_NAME" >/dev/null 2>&1 || true
+        docker run -d --name "$NODE_CONTAINER_NAME" --restart unless-stopped --init --network host \
+            --env-file "$CREDENTIALS_FILE" \
+            -v "${CONFIG_FILE}:/etc/xboard-node/config.yml:ro" \
+            -v "${INSTALL_ROOT}/certs:/etc/xboard-node/certs" \
+            -v "${INSTALL_ROOT}/state:/etc/xboard-node/state" \
+            -v "${INSTALL_ROOT}/instances:/etc/xboard-node/instances" \
+            "ghcr.io/voidintheshell/xboard-node:${RELEASE_VERSION}" >/dev/null
+        docker run -d --name "$UPDATER_CONTAINER_NAME" --restart unless-stopped --network host \
+            --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            --security-opt no-new-privileges --cap-drop ALL \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${UPDATER_CONFIG_PATH}:${UPDATER_CONFIG_PATH}:ro" \
+            -v "${UPDATER_TOKEN_PATH}:${UPDATER_TOKEN_PATH}:ro" \
+            -v "${UPDATER_STATE_DIR}:${UPDATER_STATE_DIR}" \
+            "$UPDATER_IMAGE" updater run --config "$UPDATER_CONFIG_PATH" >/dev/null
+        return
+    fi
+    docker compose --project-name "$COMPOSE_PROJECT" --file "$COMPOSE_FILE" up -d xboard-node xboard-updater >/dev/null
 }
 
 wait_for_health() {
+    if [ "$INSTALLATION_METHOD" != "systemd" ]; then
+        local attempt=0
+        while [ "$attempt" -lt 30 ]; do
+            if docker inspect --format '{{.State.Running}}' "$NODE_CONTAINER_NAME" 2>/dev/null | grep -qx true \
+                && curl -fsS "http://127.0.0.1:${HEALTH_PORT}/healthz" >/dev/null 2>&1; then
+                return 0
+            fi
+            sleep 1
+            attempt=$((attempt + 1))
+        done
+        return 1
+    fi
     if ! systemctl is-active "$SERVICE_NAME" >/dev/null 2>&1; then
         return 1
     fi
@@ -725,6 +1262,14 @@ show_recent_logs() {
 }
 
 start_service() {
+    if [ "$INSTALLATION_METHOD" != "systemd" ]; then
+        start_container_deployment
+        if ! wait_for_health; then
+            log_error "Container deployment failed health check"
+            return 1
+        fi
+        return 0
+    fi
     if systemctl is-enabled "$SERVICE_NAME" >/dev/null 2>&1; then
         systemctl restart "$SERVICE_NAME"
     else
@@ -743,10 +1288,19 @@ perform_install() {
     require_reconfigure_confirmation
     TMP_DIR=$(mktemp -d)
     ensure_dirs
+    # Complete release download/version preflight before exchanging the
+    # one-time enrollment token. A bad artifact must not consume a usable
+    # installation credential.
     stage_binary
     stage_xbctl
+    stage_updater
+    enroll_machine
     render_config
-    render_service
+    render_updater_config
+    render_compose_file
+    if [ "$INSTALLATION_METHOD" = "systemd" ]; then
+        render_service
+    fi
     backup_existing_state
     install_staged_files
     start_service
@@ -759,14 +1313,20 @@ perform_install() {
         log_info "Health: http://127.0.0.1:${HEALTH_PORT}/healthz"
     fi
     log_info "CLI: ${CLI_PATH}  (run '${CLI_PATH} list' if xbctl is not in PATH)"
-    if [ -f /etc/xboard-updater/config.json ]; then
+    if [ -f /etc/xboard-updater/config.json ] && { [ -x "$UPDATER_BINARY_PATH" ] || [ -f "$TMP_DIR/xboard-updater" ]; }; then
         "$CLI_PATH" updater install --config /etc/xboard-updater/config.json
+    elif [ -f /etc/xboard-updater/config.json ]; then
+        log_warn "Updater config exists, but no standalone xboard-updater is installed; rerun with --updater-version or --updater-binary"
     else
-        log_info "Host updater included in xbctl. Enroll this installation with updater.sample.json and 'xbctl updater install'."
+        log_info "Standalone updater is independent from xbctl. Provide --updater-version from an Admin Release, then enroll with 'xbctl updater install'."
     fi
 }
 
 perform_upgrade() {
+    if [ "$INSTALLATION_METHOD" != "systemd" ]; then
+        log_error "Use the standalone Updater to upgrade a Docker or Compose installation"
+        return 1
+    fi
     detect_current_state
     if [ "$CURRENT_STATE" = "fresh" ]; then
         log_warn "No existing install found; falling back to install"
@@ -777,10 +1337,15 @@ perform_upgrade() {
     ensure_dirs
     stage_binary
     stage_xbctl
+    stage_updater
     render_service
     backup_existing_state
     install -m 755 "$TMP_DIR/xboard-node" "$BINARY_PATH"
     install -m 755 "$TMP_DIR/xbctl" "$CLI_PATH"
+    if [ -f "$TMP_DIR/xboard-updater" ]; then
+        install -d -m 755 "$(dirname "$UPDATER_BINARY_PATH")"
+        install -m 755 "$TMP_DIR/xboard-updater" "$UPDATER_BINARY_PATH"
+    fi
     ln -sf "$CLI_PATH" /usr/bin/xbctl 2>/dev/null || true
     install -m 644 "$TMP_DIR/${SERVICE_NAME}" "$SERVICE_PATH"
     systemctl daemon-reload
@@ -815,6 +1380,9 @@ perform_uninstall() {
     fi
     rm -f "$BINARY_PATH"
     rm -f "$CLI_PATH"
+    rm -f "$UPDATER_BINARY_PATH"
+    rm -f "$UPDATER_CONFIG_PATH" "$UPDATER_TOKEN_PATH" "$UPDATER_SERVICE_PATH"
+    systemctl daemon-reload >/dev/null 2>&1 || true
     rm -f /usr/bin/xbctl 2>/dev/null || true
     if [ "$PURGE" -eq 1 ]; then
         rm -rf "$INSTALL_ROOT"
@@ -868,12 +1436,16 @@ main() {
     check_root
     detect_arch
     detect_os
-    ensure_systemd
+    if [ "$INSTALLATION_METHOD" = "systemd" ]; then
+        ensure_systemd
+    else
+        ensure_docker
+    fi
     install_dependencies
 
     # Resolve once so Node and xbctl cannot download two different latest releases.
     if [ "$ACTION" = "install" ] || [ "$ACTION" = "upgrade" ]; then
-        if [ -z "$BINARY_SOURCE" ] || [ -z "$CLI_BINARY_SOURCE" ]; then
+        if [ -n "$ENROLLMENT_TOKEN" ] || [ -z "$BINARY_SOURCE" ] || [ -z "$CLI_BINARY_SOURCE" ]; then
             resolve_release_version
         fi
     fi

@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/cedar2025/xboard-node/internal/config"
-	"github.com/cedar2025/xboard-node/internal/updater"
 	"gopkg.in/yaml.v3"
 )
 
@@ -157,7 +156,7 @@ func run(args []string) error {
 	}
 	switch args[0] {
 	case "updater":
-		return updater.CLI(args[1:])
+		return runUpdaterShim(args[1:])
 	case "status":
 		return runStatus()
 	case "list":

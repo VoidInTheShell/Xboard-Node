@@ -2,6 +2,9 @@
   "panel_url": "https://panel.example.com",
   "token_file": "/etc/xboard-updater/token",
   "state_dir": "/var/lib/xboard-updater",
+  "executor_id": "primary-executor",
+  "installation_method": "systemd",
+  "handoff_path": "/var/lib/xboard-updater/handoff.json",
   "targets": [
     {
       "id": "primary",
