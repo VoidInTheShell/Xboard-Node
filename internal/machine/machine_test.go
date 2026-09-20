@@ -54,6 +54,58 @@ func TestOnWSEventUsesNodeEffectiveKernel(t *testing.T) {
 	}
 }
 
+func TestResolveKernelForPanelNode(t *testing.T) {
+	tests := []struct {
+		name     string
+		snapshot *panel.NodeConfig
+		fallback string
+		want     string
+	}{
+		{
+			name: "explicit xray kernel wins over machine default",
+			snapshot: &panel.NodeConfig{
+				KernelType: "xray",
+				Network:    "tcp",
+			},
+			fallback: "singbox",
+			want:     "xray",
+		},
+		{
+			name: "native config implies xray for legacy response",
+			snapshot: &panel.NodeConfig{
+				Network:    "tcp",
+				XrayConfig: map[string]any{"routing": map[string]any{}},
+			},
+			fallback: "singbox",
+			want:     "xray",
+		},
+		{
+			name: "explicit singbox remains singbox",
+			snapshot: &panel.NodeConfig{
+				KernelType: "singbox",
+				Network:    "tcp",
+			},
+			fallback: "xray",
+			want:     "singbox",
+		},
+		{
+			name: "missing kernel keeps fallback",
+			snapshot: &panel.NodeConfig{
+				Network: "tcp",
+			},
+			fallback: "singbox",
+			want:     "singbox",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveKernelForPanelNode(tt.snapshot, tt.fallback); got != tt.want {
+				t.Fatalf("resolveKernelForPanelNode() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestOnWSEventDropsConfigBeforeEffectiveKernelReady(t *testing.T) {
 	mailbox := controlplane.NewNodeMailbox()
 	mailbox.MarkReady()

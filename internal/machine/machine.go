@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -220,13 +221,22 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 
 	perNodeClient := o.client.ForNode(mn.ID)
 
-	// Pre-fetch node config to detect transport-based kernel requirements.
-	// If the transport (e.g. xhttp) is incompatible with the configured kernel
-	// (e.g. singbox), auto-switch to the required kernel for this node.
+	// Pre-fetch node config to resolve the per-node kernel contract before
+	// validating the runtime snapshot. The panel may select a different kernel
+	// for each machine node; native xray_config is also an explicit Xray signal
+	// for older responses that predate kernel_type. Without this step a machine
+	// whose local default is sing-box rejects a valid Xray control-plane config.
 	if cfgSnapshot, err := perNodeClient.GetConfig(); err == nil && cfgSnapshot != nil {
-		if resolved := model.ResolveKernelForTransport(cfgSnapshot.Network, nodeCfg.Kernel.Type); resolved != nodeCfg.Kernel.Type {
+		configuredKernel := nodeCfg.Kernel.Type
+		if resolved := resolveKernelForPanelNode(cfgSnapshot, configuredKernel); resolved != configuredKernel {
+			nlog.Core().Info(fmt.Sprintf("machine: selecting panel kernel for node %d (%s→%s)",
+				mn.ID, configuredKernel, resolved))
+			nodeCfg.Kernel.Type = resolved
+			configuredKernel = resolved
+		}
+		if resolved := model.ResolveKernelForTransport(cfgSnapshot.Network, configuredKernel); resolved != configuredKernel {
 			nlog.Core().Info(fmt.Sprintf("machine: auto-switching kernel for node %d (%s→%s, transport=%s)",
-				mn.ID, nodeCfg.Kernel.Type, resolved, cfgSnapshot.Network))
+				mn.ID, configuredKernel, resolved, cfgSnapshot.Network))
 			nodeCfg.Kernel.Type = resolved
 		}
 	}
@@ -271,6 +281,33 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 				"node_id", mn.ID, "error", err)
 		}
 	}()
+}
+
+// resolveKernelForPanelNode applies the per-node kernel contract from the
+// panel, falling back to the machine's local kernel when older panel responses
+// omit it. A non-empty native Xray config is an unambiguous Xray signal and is
+// used only as a compatibility fallback; an explicit kernel_type remains
+// authoritative so an inconsistent response fails through normal validation.
+func resolveKernelForPanelNode(snapshot *panel.NodeConfig, fallback string) string {
+	if snapshot == nil {
+		return fallback
+	}
+	kernel := strings.ToLower(strings.TrimSpace(snapshot.KernelType))
+	switch kernel {
+	case "sing-box":
+		return "singbox"
+	case "singbox", "xray":
+		return kernel
+	case "":
+		if len(snapshot.XrayConfig) > 0 {
+			return "xray"
+		}
+	default:
+		// Leave unsupported values for ValidateNodeSpec to reject rather than
+		// silently choosing a different kernel.
+		return kernel
+	}
+	return fallback
 }
 
 func (o *Orchestrator) stopNode(nodeID int) {
