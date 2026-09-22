@@ -201,7 +201,7 @@ func run(args []string) error {
 func printUsage() {
 	fmt.Println(`xbctl commands:
   xbctl help
-  xbctl updater check|install|run --config /etc/xboard-updater/config.json
+  xbctl updater check|install|run|recover --config /etc/xboard-updater/config.json
   xbctl status
   xbctl list [--output text|json]
   xbctl instance list [--output text|json]

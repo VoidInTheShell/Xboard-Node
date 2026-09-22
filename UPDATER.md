@@ -12,7 +12,7 @@ xbctl updater install --config /etc/xboard-updater/config.json
 systemctl status xboard-updater.service
 ```
 
-`install.sh` 发现已有 `/etc/xboard-updater/config.json` 时会安装更新服务；没有配置时不会创建凭据或假装已接入。`check` 仅校验配置，不运行任务。更新器只读取本机登记的目标，不接受面板下发的 shell 命令或任意下载源。
+`install.sh` 发现已有 `/etc/xboard-updater/config.json` 时会安装更新服务；没有配置时不会创建凭据或假装已接入。`xbctl updater check` 仅校验配置，不运行任务。更新器只读取本机登记的目标，不接受面板下发的 shell 命令或任意下载源。`xbctl updater recover` 是受控恢复入口：默认干跑列出损坏的本地状态文件（更新日志/交接记录），加 `--yes` 后将其归档保留现场；归档前请人工核对实例健康，之后重启更新器服务恢复接任务。
 
 一个 node/machine/standalone 进程以及其所有入站是一个安装实例；不能把共享同一二进制、systemd 服务或容器的入站登记为多个更新实例。添加独立安装时，在配置的 `targets` 数组增加单独的 ID、实际服务和健康地址。
 
@@ -20,6 +20,6 @@ Docker 实例设置 `method: "docker"` 和 `container`；Compose 实例设置 `m
 
 Admin“版本更新 → 节点客户端更新”展示实例当前版本及当前分支检测到的版本。点击单行或批量升级后，在弹窗选择主线/Dev 和准确版本；同机串行、每实例独立记录结果。版本下载失败不替换原实例；替换后验证准确版本和配置的健康地址，失败尝试恢复旧二进制/容器。业务侧的面板重连与入站恢复仍应在测试环境中验收，HTTP 健康检查不能替代真实流量测试。
 
-排障使用 `journalctl -u xboard-updater.service`，任务日志和快照在 `/var/lib/xboard-updater`。不要删除执行中的 `active.json`，不要同时手工替换实例。恢复失败会锁定后续任务，人工恢复并验证后在面板后端使用 `update:executor node --machine-id=<ID> --resume` 解锁。快照可能含凭据，禁止上传公开仓库。版本发布不会自动升级已接入主机。
+排障使用 `journalctl -u xboard-updater.service`，任务日志和快照在 `/var/lib/xboard-updater`。不要删除执行中的 `active.json`，不要同时手工替换实例。本地状态损坏时更新器进入降级运行：继续向面板心跳并把所有实例标记为未就绪（面板会显示原因），但不再领取任务，也不会崩溃重启；人工核对实例健康后用 `xbctl updater recover --yes` 归档损坏文件并重启服务即可恢复。恢复失败会锁定后续任务，人工恢复并验证后在面板后端使用 `update:executor node --machine-id=<ID> --resume` 解锁。快照可能含凭据，禁止上传公开仓库。版本发布不会自动升级已接入主机。
 
 面板自身更新、MCP 参数和数据库恢复规则见 Xboard 仓库 `deploy/updater/README.md`。
